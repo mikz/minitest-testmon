@@ -1,0 +1,8 @@
+test:
+  adapter: postgresql
+  encoding: unicode
+  host: <%= ENV.fetch("RAILS_ACCEPTANCE_DB_HOST", "localhost") %>
+  username: <%= ENV.fetch("RAILS_ACCEPTANCE_DB_USER", "postgres") %>
+  password: <%= ENV["RAILS_ACCEPTANCE_DB_PASSWORD"] %>
+  database: <%= ENV.fetch("RAILS_ACCEPTANCE_DATABASE") %>
+  pool: 5

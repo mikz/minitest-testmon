@@ -1,0 +1,6 @@
+/.bundle/
+/.minitest-testmon.sqlite3*
+/coverage/
+/pkg/
+/tmp/
+/*.gem

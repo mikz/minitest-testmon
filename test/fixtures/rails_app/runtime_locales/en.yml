@@ -1,0 +1,3 @@
+en:
+  acceptance:
+    runtime_greeting: Hello from runtime locale v1

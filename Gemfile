@@ -1,0 +1,20 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+ruby "~> 4.0.0"
+
+gemspec
+
+group :development do
+  gem "irb"
+  gem "rake", "~> 13.0"
+  gem "standard", "~> 1.55", require: false
+end
+
+group :test do
+  gem "minitest-reporters", "= 1.7.1"
+  gem "pg", "~> 1.6"
+  gem "rails", "~> 8.1.0"
+  gem "simplecov", "~> 0.22", require: false
+end

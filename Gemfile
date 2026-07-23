@@ -16,5 +16,5 @@ group :test do
   gem "minitest-reporters", "= 1.7.1"
   gem "pg", "~> 1.6"
   gem "rails", "~> 8.1.0"
-  gem "simplecov", "~> 0.22", require: false
+  gem "simplecov", "~> 1.0", require: false
 end

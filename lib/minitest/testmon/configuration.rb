@@ -7,7 +7,6 @@ module Minitest
     class Configuration
       FORMAT_VERSION = 1
       DEFAULT_DATABASE = ".minitest-testmon.sqlite3"
-      DEFAULT_REPORT = "tmp/minitest-testmon/discovery.json"
 
       FileSetDefinition = Data.define(:name, :root, :base, :include_patterns, :exclude_patterns, :mode, :scope) do
         def signature
@@ -23,12 +22,11 @@ module Minitest
         end
       end
 
-      attr_reader :database_path, :report_path, :roots, :ruby_patterns, :filesets, :disabled_bundles
+      attr_reader :database_path, :roots, :ruby_patterns, :filesets, :disabled_bundles
 
       def initialize(cwd: Dir.pwd)
         @version = FORMAT_VERSION
         @database_path = File.join(cwd, DEFAULT_DATABASE)
-        @report_path = File.join(cwd, DEFAULT_REPORT)
         @roots = {}
         @ruby_patterns = [[:project, "lib/**/*.rb"], [:project, "test/**/*.rb"]]
         @filesets = []
@@ -59,11 +57,6 @@ module Minitest
       def database(path)
         mutable!
         @database_path = File.expand_path(path, project_root)
-      end
-
-      def report(path)
-        mutable!
-        @report_path = File.expand_path(path, project_root)
       end
 
       def ruby_files(*patterns, root: :project)
@@ -189,7 +182,6 @@ module Minitest
         @config_sources = @config_sources.sort_by { |item| item[:path] }.freeze
         @disabled_bundles = @disabled_bundles.map(&:to_sym).uniq.sort.freeze
         @database_path = File.expand_path(@database_path)
-        @report_path = File.expand_path(@report_path)
         @frozen_snapshot = true
         freeze
       end

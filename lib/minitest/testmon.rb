@@ -3,9 +3,9 @@
 require "digest/sha2"
 
 require_relative "testmon/version"
+require_relative "testmon/environment"
 require_relative "testmon/errors"
 require_relative "testmon/canonical_json"
-require_relative "testmon/atomic_file"
 require_relative "testmon/engine"
 require_relative "testmon/provider_definition"
 require_relative "testmon/configuration"
@@ -203,4 +203,4 @@ module Minitest
   end
 end
 
-Minitest::Testmon.start_early_observation! if ENV["MINITEST_TESTMON"] == "1"
+Minitest::Testmon.start_early_observation! if Minitest::Testmon::Environment.enabled?

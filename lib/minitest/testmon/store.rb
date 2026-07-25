@@ -18,7 +18,9 @@ module Minitest
     end
 
     class Store
-      SCHEMA_VERSION = 3
+      SCHEMA_VERSION = 4
+      RETAIN_GENERATIONS = 10
+      RETAIN_RUNS = 100
       SchemaIncompatible = Class.new(StandardError)
 
       attr_reader :path, :recovery_reason, :recovered_run_id
@@ -54,6 +56,7 @@ module Minitest
           @recovered_run_id = existing["run_id"]
           @database.execute("DELETE FROM leases WHERE name = 'cache'")
           set_metadata("recovery_required", @recovery_reason)
+          abandon_run(@recovered_run_id, @recovery_reason)
         end
         @lease_token = SecureRandom.uuid
         @lease_owner_pid = Process.pid
@@ -136,7 +139,11 @@ module Minitest
       end
 
       def published_inventory
-        value = metadata("published_inventory")
+        return unless generation
+        value = @database.get_first_value(
+          "SELECT inventory_json FROM graph_generations WHERE id = ?",
+          [generation]
+        )
         value && CanonicalJSON.parse(value)
       rescue JSON::ParserError
         nil
@@ -149,7 +156,10 @@ module Minitest
         return Selection.new(mode: :full, tests: [], reasons: ["context_changed"], generation: current_generation) unless metadata("context_signature") == context_signature
         return Selection.new(mode: :full, tests: [], reasons: ["unknown_artifact"], generation: current_generation) if artifacts.any? { |artifact| artifact.fingerprint.nil? || artifact.fingerprint.unknown? }
 
-        stored_rows = @database.execute("SELECT key, root, relative_path, facet, fingerprint, state, metadata_json FROM artifacts")
+        stored_rows = @database.execute(
+          "SELECT key, root, relative_path, facet, fingerprint, state, metadata_json FROM graph_artifacts WHERE generation_id = ?",
+          [current_generation]
+        )
         stored = stored_rows.to_h do |row|
           [row.fetch("key"), [row.fetch("fingerprint"), row.fetch("state")]]
         end
@@ -180,14 +190,17 @@ module Minitest
         end
 
         placeholders = (["?"] * changed.length).join(",")
-        tests = @database.execute("SELECT DISTINCT test_id FROM edges WHERE artifact_key IN (#{placeholders})", changed).map { |row| row.fetch("test_id") }.concat(dirty).uniq.sort
+        tests = @database.execute(
+          "SELECT DISTINCT test_id FROM graph_edges WHERE generation_id = ? AND artifact_key IN (#{placeholders})",
+          [current_generation, *changed]
+        ).map { |row| row.fetch("test_id") }.concat(dirty).uniq.sort
         return Selection.new(mode: :full, tests: [], reasons: ["suite_dependency_changed"], generation: current_generation) if tests.include?("*")
         return Selection.new(mode: :full, tests: [], reasons: ["unclaimed_artifact_changed"], generation: current_generation) if tests.empty?
 
         Selection.new(mode: :subset, tests: tests, reasons: changed.sort, generation: current_generation)
       end
 
-      def publish(report, outcomes: {}, publication_reason: nil)
+      def publish(report, outcomes: {}, publication_reason: nil, run_id: nil)
         raise PhaseError, "exclusive cache lease is required" unless @leased && @lease_owner_pid == Process.pid
         raise PhaseError, "cache store is disconnected" unless connected?
         @database.execute("BEGIN IMMEDIATE")
@@ -212,14 +225,18 @@ module Minitest
           mark_dirty(skipped, outcome: :skipped) if previous_generation && skipped.any?
           reason = report.diagnostics.include?("worker_incomplete") ? "worker_incomplete" : "provider_incomplete"
           set_metadata("recovery_required", reason)
+          rejected = report.with_generation(previous_generation).unpublished(reason)
+          finalize_run(run_id, rejected)
           finish_lease_transaction
           @recovery_reason = reason
-          return report.with_generation(previous_generation).unpublished(reason)
+          return rejected
         end
         if failed.any?
           mark_dirty(failed, outcome: :failed) if previous_generation
+          rejected = report.with_generation(previous_generation).unpublished("test_failure")
+          finalize_run(run_id, rejected)
           finish_lease_transaction
-          return report.with_generation(previous_generation).unpublished("test_failure")
+          return rejected
         end
 
         test_states = stored_test_states(skipped)
@@ -231,19 +248,23 @@ module Minitest
         if unsafe_skips.any? && !recovering_skip
           mark_dirty(unsafe_skips, outcome: :skipped)
           set_metadata("recovery_required", "test_skip")
+          rejected = report.with_generation(previous_generation).unpublished("test_skip")
+          finalize_run(run_id, rejected)
           finish_lease_transaction
           @recovery_reason = "test_skip"
-          return report.with_generation(previous_generation).unpublished("test_skip")
+          return rejected
         end
         report = report.without_test_dependencies(skipped)
         if certify_known_skips?(report, skipped, test_states)
+          certified = report.certified(previous_generation)
+          finalize_run(run_id, certified)
           finish_lease_transaction
-          return report.certified(previous_generation)
+          return certified
         end
 
-        reset_for_context!(report.context_signature)
+        same_context = previous_generation && metadata("context_signature") == report.context_signature
         current_keys = report.artifacts.map(&:key).uniq
-        stored_keys = @database.execute("SELECT key FROM artifacts").map { |row| row.fetch("key") }
+        stored_keys = active_artifact_keys
         obsolete_keys = stored_keys - current_keys
         absent_tests = report.full_run? ? stored_test_ids - discovered : []
         unsafe_edges = edge_tests_for(obsolete_keys).reject do |test_id|
@@ -251,46 +272,59 @@ module Minitest
         end
         if unsafe_edges.any?
           set_metadata("recovery_required", "provider_incomplete")
+          rejected = report.with_generation(previous_generation).unpublished("provider_incomplete")
+          finalize_run(run_id, rejected)
           finish_lease_transaction
           @recovery_reason = "provider_incomplete"
-          return report.with_generation(previous_generation).unpublished("provider_incomplete")
+          return rejected
         end
 
         next_generation = (previous_generation || 0) + 1
+        inventory = report.to_h.fetch(:inventory)
         @database.execute(
-          "INSERT INTO generations(id, context_signature, complete) VALUES (?, ?, 1)",
-          [next_generation, report.context_signature]
+          "INSERT INTO graph_generations(id, context_signature, inventory_json, created_at) VALUES (?, ?, ?, ?)",
+          [next_generation, report.context_signature, CanonicalJSON.generate(inventory), Time.now.utc.iso8601(6)]
         )
+        clone_generation(previous_generation, next_generation) if same_context
         report.artifacts.each { |artifact| upsert_artifact(artifact, next_generation) }
 
         passed.each do |test_id|
-          @database.execute("INSERT INTO tests(id, outcome, complete, generation) VALUES (?, 'passed', 1, ?) ON CONFLICT(id) DO UPDATE SET outcome='passed', complete=1, generation=excluded.generation", [test_id, next_generation])
-          @database.execute("DELETE FROM edges WHERE test_id = ?", [test_id])
+          @database.execute(
+            "INSERT INTO graph_tests(generation_id, id, outcome, complete) VALUES (?, ?, 'passed', 1) ON CONFLICT(generation_id, id) DO UPDATE SET outcome='passed', complete=1",
+            [next_generation, test_id]
+          )
+          @database.execute("DELETE FROM graph_edges WHERE generation_id = ? AND test_id = ?", [next_generation, test_id])
+          @database.execute("DELETE FROM dirty_tests WHERE id = ?", [test_id])
         end
         skipped.each do |test_id|
-          @database.execute("INSERT INTO tests(id, outcome, complete, generation) VALUES (?, 'skipped', 0, ?) ON CONFLICT(id) DO UPDATE SET outcome='skipped', complete=0, generation=excluded.generation", [test_id, next_generation])
-          @database.execute("DELETE FROM edges WHERE test_id = ?", [test_id])
+          @database.execute(
+            "INSERT INTO graph_tests(generation_id, id, outcome, complete) VALUES (?, ?, 'skipped', 0) ON CONFLICT(generation_id, id) DO UPDATE SET outcome='skipped', complete=0",
+            [next_generation, test_id]
+          )
+          @database.execute("DELETE FROM graph_edges WHERE generation_id = ? AND test_id = ?", [next_generation, test_id])
+          @database.execute("DELETE FROM dirty_tests WHERE id = ?", [test_id])
         end
-        @database.execute("DELETE FROM edges WHERE test_id = '*' ")
+        @database.execute("DELETE FROM graph_edges WHERE generation_id = ? AND test_id = '*'", [next_generation])
         report.dependencies.each do |dependency|
           next unless dependency.complete
           next unless dependency.test_id == "*" || passed.include?(dependency.test_id)
           @database.execute(
-            "INSERT OR IGNORE INTO edges(test_id, artifact_key, provider, generation) VALUES (?, ?, ?, ?)",
-            [dependency.test_id, dependency.artifact_key, dependency.provider.to_s, next_generation]
+            "INSERT OR IGNORE INTO graph_edges(generation_id, test_id, artifact_key, provider) VALUES (?, ?, ?, ?)",
+            [next_generation, dependency.test_id, dependency.artifact_key, dependency.provider.to_s]
           )
         end
-        delete_tests(absent_tests)
-        delete_artifacts(obsolete_keys)
+        delete_tests(absent_tests, next_generation)
+        delete_artifacts(obsolete_keys, next_generation)
         set_metadata("generation", next_generation.to_s)
         set_metadata("context_signature", report.context_signature)
         set_metadata("schema_version", SCHEMA_VERSION.to_s)
-        set_metadata("published_inventory", CanonicalJSON.generate(report.to_h.fetch(:inventory)))
         @database.execute("DELETE FROM metadata WHERE key = 'recovery_required'")
+        published = report.published(next_generation, reason: publication_reason)
+        finalize_run(run_id, published)
         finish_lease_transaction
         @recovery_reason = nil
         @recovered_run_id = nil
-        report.published(next_generation, reason: publication_reason)
+        published
       rescue
         begin
           @database.execute("ROLLBACK")
@@ -301,14 +335,18 @@ module Minitest
         raise
       end
 
-      def explain(paths)
+      def explain(paths, generation: self.generation)
         terms = Array(paths).map(&:to_s)
+        return [] unless generation
         rows = @database.execute(<<~SQL)
-          SELECT artifacts.root, artifacts.relative_path, artifacts.facet,
-                 artifacts.fingerprint, edges.test_id, edges.provider
-          FROM artifacts
-          LEFT JOIN edges ON edges.artifact_key = artifacts.key
-          ORDER BY artifacts.root, artifacts.relative_path, artifacts.facet, edges.test_id
+          SELECT graph_artifacts.root, graph_artifacts.relative_path, graph_artifacts.facet,
+                 graph_artifacts.fingerprint, graph_edges.test_id, graph_edges.provider
+          FROM graph_artifacts
+          LEFT JOIN graph_edges
+            ON graph_edges.generation_id = graph_artifacts.generation_id
+           AND graph_edges.artifact_key = graph_artifacts.key
+          WHERE graph_artifacts.generation_id = #{Integer(generation)}
+          ORDER BY graph_artifacts.root, graph_artifacts.relative_path, graph_artifacts.facet, graph_edges.test_id
         SQL
         rows.filter_map do |row|
           logical = "#{row.fetch("root")}:#{row.fetch("relative_path")}"
@@ -323,6 +361,62 @@ module Minitest
             provider: row["provider"]
           }
         end
+      end
+
+      def begin_run(run_id:, mode:, context_signature: nil)
+        @database.execute(
+          "INSERT OR IGNORE INTO run_receipts(id, mode, state, context_signature, base_generation_id, started_at) VALUES (?, ?, 'pending', ?, ?, ?)",
+          [run_id.to_s, mode.to_s, context_signature, generation, Time.now.utc.iso8601(6)]
+        )
+        run_id.to_s
+      end
+
+      def record_report(run_id, report)
+        @database.execute("BEGIN IMMEDIATE")
+        finalize_run(run_id, report)
+        @database.execute("COMMIT")
+        report
+      rescue
+        begin
+          @database.execute("ROLLBACK")
+        rescue
+          nil
+        end
+        raise
+      end
+
+      def certify(report, run_id:)
+        raise PhaseError, "exclusive cache lease is required" unless @leased && @lease_owner_pid == Process.pid
+        @database.execute("BEGIN IMMEDIATE")
+        verify_lease!
+        finalize_run(run_id, report)
+        finish_lease_transaction
+        report
+      rescue
+        begin
+          @database.execute("ROLLBACK")
+        rescue
+          nil
+        end
+        raise
+      end
+
+      def report(run_id = nil)
+        row = if run_id
+          @database.get_first_row("SELECT report_json FROM run_receipts WHERE id = ? AND state = 'complete'", [run_id.to_s])
+        else
+          @database.get_first_row("SELECT report_json FROM run_receipts WHERE state = 'complete' ORDER BY finished_at DESC, rowid DESC LIMIT 1")
+        end
+        row && CanonicalJSON.parse(row.fetch("report_json"))
+      rescue JSON::ParserError
+        nil
+      end
+
+      def runs(limit: 20)
+        @database.execute(
+          "SELECT id, mode, state, base_generation_id, published_generation_id, publication_reason, started_at, finished_at FROM run_receipts ORDER BY started_at DESC LIMIT ?",
+          [Integer(limit)]
+        )
       end
 
       private
@@ -372,13 +466,15 @@ module Minitest
             run_id TEXT,
             created_at TEXT NOT NULL
           );
-          CREATE TABLE generations (
+          CREATE TABLE graph_generations (
             id INTEGER PRIMARY KEY,
             context_signature TEXT NOT NULL,
-            complete INTEGER NOT NULL CHECK (complete IN (0, 1))
+            inventory_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
           );
-          CREATE TABLE artifacts (
-            key TEXT PRIMARY KEY,
+          CREATE TABLE graph_artifacts (
+            generation_id INTEGER NOT NULL REFERENCES graph_generations(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
             root TEXT NOT NULL,
             relative_path TEXT NOT NULL,
             facet TEXT NOT NULL,
@@ -386,23 +482,44 @@ module Minitest
             state TEXT NOT NULL,
             reason TEXT,
             metadata_json TEXT NOT NULL,
-            generation INTEGER NOT NULL REFERENCES generations(id)
+            PRIMARY KEY(generation_id, key)
           );
-          CREATE INDEX artifacts_path ON artifacts(root, relative_path);
-          CREATE TABLE tests (
-            id TEXT PRIMARY KEY,
+          CREATE INDEX graph_artifacts_path ON graph_artifacts(generation_id, root, relative_path);
+          CREATE TABLE graph_tests (
+            generation_id INTEGER NOT NULL REFERENCES graph_generations(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
             outcome TEXT NOT NULL,
             complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
-            generation INTEGER NOT NULL REFERENCES generations(id)
+            PRIMARY KEY(generation_id, id)
           );
-          CREATE TABLE edges (
+          CREATE TABLE graph_edges (
+            generation_id INTEGER NOT NULL,
             test_id TEXT NOT NULL,
-            artifact_key TEXT NOT NULL REFERENCES artifacts(key),
+            artifact_key TEXT NOT NULL,
             provider TEXT NOT NULL,
-            generation INTEGER NOT NULL REFERENCES generations(id),
-            PRIMARY KEY(test_id, artifact_key, provider)
+            PRIMARY KEY(generation_id, test_id, artifact_key, provider),
+            FOREIGN KEY(generation_id, artifact_key)
+              REFERENCES graph_artifacts(generation_id, key) ON DELETE CASCADE
           );
-          CREATE INDEX edges_artifact ON edges(artifact_key, test_id);
+          CREATE INDEX graph_edges_artifact ON graph_edges(generation_id, artifact_key, test_id);
+          CREATE TABLE dirty_tests (
+            id TEXT PRIMARY KEY,
+            outcome TEXT NOT NULL
+          );
+          CREATE TABLE run_receipts (
+            id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'complete', 'abandoned')),
+            context_signature TEXT,
+            base_generation_id INTEGER,
+            published_generation_id INTEGER,
+            publication_reason TEXT,
+            report_schema_version INTEGER,
+            report_json TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT
+          );
+          CREATE INDEX run_receipts_finished ON run_receipts(state, finished_at);
         SQL
         set_metadata("schema_version", SCHEMA_VERSION.to_s)
       end
@@ -423,29 +540,37 @@ module Minitest
         raise Error, "cache_corrupt_quarantine_failed: #{error.message}"
       end
 
-      def reset_for_context!(signature)
-        return if metadata("context_signature").nil? || metadata("context_signature") == signature
-        @database.execute("DELETE FROM edges")
-        @database.execute("DELETE FROM tests")
-        @database.execute("DELETE FROM artifacts")
-        @database.execute("DELETE FROM generations")
-        @database.execute("DELETE FROM metadata WHERE key IN ('generation', 'context_signature')")
-      end
-
       def upsert_artifact(artifact, generation)
         metadata_json = CanonicalJSON.generate({members: artifact.members, scope: artifact.scope, test_ids: artifact.test_ids})
-        @database.execute(<<~SQL, [artifact.key, artifact.root.to_s, artifact.relative_path, artifact.facet, artifact.fingerprint&.digest, artifact.fingerprint&.state&.to_s || "unknown", artifact.reason&.to_s, metadata_json, generation])
-          INSERT INTO artifacts(key, root, relative_path, facet, fingerprint, state, reason, metadata_json, generation)
+        @database.execute(<<~SQL, [generation, artifact.key, artifact.root.to_s, artifact.relative_path, artifact.facet, artifact.fingerprint&.digest, artifact.fingerprint&.state&.to_s || "unknown", artifact.reason&.to_s, metadata_json])
+          INSERT INTO graph_artifacts(generation_id, key, root, relative_path, facet, fingerprint, state, reason, metadata_json)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(key) DO UPDATE SET
+          ON CONFLICT(generation_id, key) DO UPDATE SET
             root=excluded.root,
             relative_path=excluded.relative_path,
             facet=excluded.facet,
             fingerprint=excluded.fingerprint,
             state=excluded.state,
             reason=excluded.reason,
-            metadata_json=excluded.metadata_json,
-            generation=excluded.generation
+            metadata_json=excluded.metadata_json
+        SQL
+      end
+
+      def clone_generation(source, target)
+        @database.execute(<<~SQL, [target, source])
+          INSERT INTO graph_artifacts(
+            generation_id, key, root, relative_path, facet, fingerprint, state, reason, metadata_json
+          )
+          SELECT ?, key, root, relative_path, facet, fingerprint, state, reason, metadata_json
+          FROM graph_artifacts WHERE generation_id = ?
+        SQL
+        @database.execute(<<~SQL, [target, source])
+          INSERT INTO graph_tests(generation_id, id, outcome, complete)
+          SELECT ?, id, outcome, complete FROM graph_tests WHERE generation_id = ?
+        SQL
+        @database.execute(<<~SQL, [target, source])
+          INSERT INTO graph_edges(generation_id, test_id, artifact_key, provider)
+          SELECT ?, test_id, artifact_key, provider FROM graph_edges WHERE generation_id = ?
         SQL
       end
 
@@ -521,29 +646,45 @@ module Minitest
       end
 
       def dirty_test_rows
-        @database.execute("SELECT id, outcome FROM tests WHERE outcome != 'passed' ORDER BY id")
+        accepted = if generation
+          @database.execute(
+            "SELECT id, outcome FROM graph_tests WHERE generation_id = ? AND outcome != 'passed'",
+            [generation]
+          )
+        else
+          []
+        end
+        rows = accepted.to_h { |row| [row.fetch("id"), row.fetch("outcome")] }
+        @database.execute("SELECT id, outcome FROM dirty_tests").each do |row|
+          rows[row.fetch("id")] = row.fetch("outcome")
+        end
+        rows.sort.map { |id, outcome| {"id" => id, "outcome" => outcome} }
       end
 
       def mark_dirty(test_ids, outcome:)
         return if test_ids.empty?
-        placeholders = (["?"] * test_ids.length).join(",")
-        @database.execute(
-          "UPDATE tests SET outcome = ?, complete = 0 WHERE id IN (#{placeholders})",
-          [outcome.to_s, *test_ids]
-        )
+        test_ids.each do |test_id|
+          @database.execute(
+            "INSERT INTO dirty_tests(id, outcome) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET outcome=excluded.outcome",
+            [test_id, outcome.to_s]
+          )
+        end
       end
 
       def stored_test_states(test_ids)
         return {} if test_ids.empty?
         placeholders = (["?"] * test_ids.length).join(",")
         @database.execute(
-          "SELECT id, outcome, complete FROM tests WHERE id IN (#{placeholders})",
-          test_ids
+          "SELECT id, outcome, complete FROM graph_tests WHERE generation_id = ? AND id IN (#{placeholders})",
+          [generation, *test_ids]
         ).to_h { |row| [row.fetch("id"), row] }
       end
 
       def test_has_edges?(test_id)
-        !@database.get_first_value("SELECT 1 FROM edges WHERE test_id = ? LIMIT 1", [test_id]).nil?
+        !@database.get_first_value(
+          "SELECT 1 FROM graph_edges WHERE generation_id = ? AND test_id = ? LIMIT 1",
+          [generation, test_id]
+        ).nil?
       end
 
       def certify_known_skips?(report, skipped, test_states)
@@ -555,7 +696,10 @@ module Minitest
           state && state.fetch("outcome") == "skipped" && Integer(state.fetch("complete")).zero?
         end
 
-        stored = @database.execute("SELECT key, fingerprint, state FROM artifacts").to_h do |row|
+        stored = @database.execute(
+          "SELECT key, fingerprint, state FROM graph_artifacts WHERE generation_id = ?",
+          [generation]
+        ).to_h do |row|
           [row.fetch("key"), [row.fetch("fingerprint"), row.fetch("state")]]
         end
         current = report.artifacts.to_h do |artifact|
@@ -565,30 +709,123 @@ module Minitest
       end
 
       def stored_test_ids
-        @database.execute("SELECT id FROM tests").map { |row| row.fetch("id") }
+        return [] unless generation
+        @database.execute(
+          "SELECT id FROM graph_tests WHERE generation_id = ?",
+          [generation]
+        ).map { |row| row.fetch("id") }
       end
 
       def edge_tests_for(artifact_keys)
         return [] if artifact_keys.empty?
         placeholders = (["?"] * artifact_keys.length).join(",")
         @database.execute(
-          "SELECT DISTINCT test_id FROM edges WHERE artifact_key IN (#{placeholders})",
-          artifact_keys
+          "SELECT DISTINCT test_id FROM graph_edges WHERE generation_id = ? AND artifact_key IN (#{placeholders})",
+          [generation, *artifact_keys]
         ).map { |row| row.fetch("test_id") }
       end
 
-      def delete_tests(test_ids)
+      def delete_tests(test_ids, target_generation)
         return if test_ids.empty?
         placeholders = (["?"] * test_ids.length).join(",")
-        @database.execute("DELETE FROM edges WHERE test_id IN (#{placeholders})", test_ids)
-        @database.execute("DELETE FROM tests WHERE id IN (#{placeholders})", test_ids)
+        @database.execute(
+          "DELETE FROM graph_edges WHERE generation_id = ? AND test_id IN (#{placeholders})",
+          [target_generation, *test_ids]
+        )
+        @database.execute(
+          "DELETE FROM graph_tests WHERE generation_id = ? AND id IN (#{placeholders})",
+          [target_generation, *test_ids]
+        )
+        @database.execute("DELETE FROM dirty_tests WHERE id IN (#{placeholders})", test_ids)
       end
 
-      def delete_artifacts(artifact_keys)
+      def delete_artifacts(artifact_keys, target_generation)
         return if artifact_keys.empty?
         placeholders = (["?"] * artifact_keys.length).join(",")
-        @database.execute("DELETE FROM edges WHERE artifact_key IN (#{placeholders})", artifact_keys)
-        @database.execute("DELETE FROM artifacts WHERE key IN (#{placeholders})", artifact_keys)
+        @database.execute(
+          "DELETE FROM graph_edges WHERE generation_id = ? AND artifact_key IN (#{placeholders})",
+          [target_generation, *artifact_keys]
+        )
+        @database.execute(
+          "DELETE FROM graph_artifacts WHERE generation_id = ? AND key IN (#{placeholders})",
+          [target_generation, *artifact_keys]
+        )
+      end
+
+      def active_artifact_keys
+        return [] unless generation
+        @database.execute(
+          "SELECT key FROM graph_artifacts WHERE generation_id = ?",
+          [generation]
+        ).map { |row| row.fetch("key") }
+      end
+
+      def finalize_run(run_id, report)
+        return report unless run_id
+        payload = report.to_h
+        inventory = published_inventory
+        payload = payload.merge(inventory:) if inventory
+        @database.execute(
+          <<~SQL,
+            INSERT INTO run_receipts(
+              id, mode, state, context_signature, base_generation_id,
+              published_generation_id, publication_reason, report_schema_version,
+              report_json, started_at, finished_at
+            )
+            VALUES (?, ?, 'complete', ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              mode=excluded.mode,
+              state='complete',
+              context_signature=excluded.context_signature,
+              published_generation_id=excluded.published_generation_id,
+              publication_reason=excluded.publication_reason,
+              report_schema_version=excluded.report_schema_version,
+              report_json=excluded.report_json,
+              finished_at=excluded.finished_at
+          SQL
+          [
+            run_id.to_s,
+            report.mode,
+            report.context_signature,
+            generation,
+            report.generation,
+            report.publication[:reason],
+            payload.fetch(:schema_version),
+            CanonicalJSON.generate(payload),
+            Time.now.utc.iso8601(6),
+            Time.now.utc.iso8601(6)
+          ]
+        )
+        prune_history
+        report
+      end
+
+      def prune_history
+        @database.execute(<<~SQL, [RETAIN_GENERATIONS])
+          DELETE FROM graph_generations
+          WHERE id IN (
+            SELECT id FROM graph_generations
+            ORDER BY id DESC
+            LIMIT -1 OFFSET ?
+          )
+        SQL
+        @database.execute(<<~SQL, [RETAIN_RUNS])
+          DELETE FROM run_receipts
+          WHERE id IN (
+            SELECT id FROM run_receipts
+            WHERE state != 'pending'
+            ORDER BY finished_at DESC, rowid DESC
+            LIMIT -1 OFFSET ?
+          )
+        SQL
+      end
+
+      def abandon_run(run_id, reason)
+        return unless run_id
+        @database.execute(
+          "UPDATE run_receipts SET state='abandoned', publication_reason=?, finished_at=? WHERE id=? AND state='pending'",
+          [reason, Time.now.utc.iso8601(6), run_id.to_s]
+        )
       end
 
       def verify_lease!

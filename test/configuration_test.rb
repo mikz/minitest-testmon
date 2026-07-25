@@ -3,6 +3,16 @@
 require_relative "test_helper"
 
 class ConfigurationTest < TestmonTestCase
+  def test_default_state_is_a_single_sqlite_database
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+
+      assert_equal File.join(project, ".minitest-testmon.sqlite3"), configuration.database_path
+      refute_respond_to configuration, :report
+      refute_respond_to configuration, :report_path
+    end
+  end
+
   def test_versioned_snapshot_is_deterministic_and_immutable
     with_project do |project|
       first = Minitest::Testmon::Configuration.new(cwd: project)

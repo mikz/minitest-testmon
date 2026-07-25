@@ -52,13 +52,12 @@ class RailsCliHarnessSelfTest < Minitest::Test
     end
   end
 
-  def test_state_snapshot_includes_every_sqlite_sidecar_and_report_bytes
+  def test_state_snapshot_includes_every_sqlite_sidecar
     project = MinitestTestmonAcceptance::Project.copy_fixture("rails_app")
     driver = MinitestTestmonAcceptance::RailsCliDriver.new(project)
     driver.state_path.dirname.mkpath
     driver.state_path.binwrite("database")
     Pathname("#{driver.state_path}-wal").binwrite("wal")
-    driver.report_path.binwrite("report")
 
     snapshot = driver.snapshot
 
@@ -66,7 +65,6 @@ class RailsCliHarnessSelfTest < Minitest::Test
       {"state.sqlite3" => "database", "state.sqlite3-wal" => "wal"},
       snapshot.database_files
     )
-    assert_equal "report", snapshot.report_bytes
   ensure
     project&.cleanup
   end
@@ -80,14 +78,8 @@ class RailsCliHarnessSelfTest < Minitest::Test
       stderr: ""
     )
     marker = Struct.new(:exist?).new(false)
-    before = MinitestTestmonAcceptance::RailsCliState.new(
-      database_files: {"state.sqlite3" => "before"},
-      report_bytes: "same"
-    )
-    after = MinitestTestmonAcceptance::RailsCliState.new(
-      database_files: {"state.sqlite3" => "after"},
-      report_bytes: "same"
-    )
+    before = MinitestTestmonAcceptance::RailsCliState.new(database_files: {"state.sqlite3" => "before"})
+    after = MinitestTestmonAcceptance::RailsCliState.new(database_files: {"state.sqlite3" => "after"})
 
     error = assert_raises(MinitestTestmonAcceptance::RailsCliOracle::Mismatch) do
       MinitestTestmonAcceptance::RailsCliOracle.assert_rejected_unchanged!(
@@ -109,10 +101,7 @@ class RailsCliHarnessSelfTest < Minitest::Test
       stderr: ""
     )
     marker = Struct.new(:exist?).new(false)
-    state = MinitestTestmonAcceptance::RailsCliState.new(
-      database_files: {"state.sqlite3" => "unchanged"},
-      report_bytes: "unchanged"
-    )
+    state = MinitestTestmonAcceptance::RailsCliState.new(database_files: {"state.sqlite3" => "unchanged"})
 
     error = assert_raises(MinitestTestmonAcceptance::RailsCliOracle::Mismatch) do
       MinitestTestmonAcceptance::RailsCliOracle.assert_rejected_unchanged!(
@@ -130,7 +119,7 @@ class RailsCliHarnessSelfTest < Minitest::Test
     result = MinitestTestmonAcceptance::CommandResult.new(
       argv: [],
       status:,
-      stdout: "--testmon --testmon-db",
+      stdout: "--testmon",
       stderr: ""
     )
 
@@ -141,7 +130,7 @@ class RailsCliHarnessSelfTest < Minitest::Test
         report_exists: false
       )
     end
-    assert_match "--testmon-report", error.message
+    assert_match "--testmon-db", error.message
   end
 
   def test_plain_help_oracle_detects_one_advertised_testmon_flag

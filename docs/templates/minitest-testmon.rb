@@ -1,18 +1,14 @@
 # frozen_string_literal: true
 
-# Copy this file to .minitest-testmon.rb.
+# No configuration file is required for the defaults. Copy this file to
+# .minitest-testmon.rb only to override a default or add custom inputs.
 Minitest::Testmon.configure do |config|
-  config.version 1
-
-  # :project defaults to Dir.pwd. Use __dir__ when commands may start elsewhere.
-  config.root :project, __dir__
-
-  config.database ".minitest-testmon.sqlite3"
-  config.report "tmp/minitest-testmon/discovery.json"
-
   # lib/**/*.rb and test/**/*.rb are included by default.
   # Rails 8.1 automatically adds app/**/*.rb.
   # config.ruby_files "components/**/*.rb"
+
+  # The SQLite state path is relative to :project.
+  # config.database "tmp/minitest-testmon/state.sqlite3"
 
   # Add another stable logical root when inputs live outside the project root.
   # config.root :shared, File.expand_path("../shared", __dir__)

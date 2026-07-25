@@ -4,7 +4,7 @@ module MinitestTestmonAcceptance
   class RailsCliOracle
     class Mismatch < StandardError; end
 
-    FLAGS = %w[--testmon --testmon-db --testmon-report].freeze
+    FLAGS = %w[--testmon --testmon-db].freeze
 
     def self.assert_help!(result, state_files:, report_exists:)
       errors = []
@@ -71,7 +71,6 @@ module MinitestTestmonAcceptance
       errors << "rejection exited #{result.exitstatus.inspect}" unless expected_statuses.include?(result.exitstatus)
       errors << "rejection executed a test body" if marker.exist?
       errors << "database bytes changed" unless after.database_files == before.database_files
-      errors << "report bytes changed" unless after.report_bytes == before.report_bytes
       raise Mismatch, errors.join("; ") unless errors.empty?
 
       true

@@ -10,7 +10,7 @@ the product only through:
 - `Minitest::Testmon.configure`;
 - `.minitest-testmon.rb`;
 - `.minitest-testmon.sqlite3`;
-- `tmp/minitest-testmon/discovery.json`.
+- `minitest-testmon report`.
 
 Run the harness from the repository root:
 
@@ -53,9 +53,9 @@ orders; and observes worker file descriptors with `lsof` when available.
 The direct Rails CLI matrix carries an exact stock `bin/rails` in the fake
 application. The fixture conventionally autorequires its test-group gems with
 `Bundler.require(*Rails.groups)`. Canonical activation is
-`bin/rails test --testmon`; database and report paths are normally supplied by
-environment, while attached `--testmon-db=PATH` and
-`--testmon-report=PATH` remain covered explicitly. Plain test/help commands
+`bin/rails test --testmon`; the database path is normally supplied by
+environment, while attached `--testmon-db=PATH` remains covered explicitly.
+Plain test/help commands
 must stay inert, and native partial path/name failures must not create state.
 The matrix also invokes
 `minitest-testmon discover|run -- /absolute/app/bin/rails test` from outside

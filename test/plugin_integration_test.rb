@@ -71,9 +71,8 @@ class PluginIntegrationTest < TestmonTestCase
       )
       assert status.success?, "nested path-gem discovery failed:\n#{stdout}\n#{stderr}"
 
-      path = File.join(directory, "tmp/minitest-testmon/discovery.json")
-      report = JSON.parse(File.binread(path))
-      assert_operator File.size(path), :<, MAX_NESTED_REPORT_BYTES
+      report = read_report(directory)
+      assert_operator Minitest::Testmon::CanonicalJSON.generate(report).bytesize, :<, MAX_NESTED_REPORT_BYTES
       assert_equal true, report.dig("publication", "published")
       assert_empty report.dig("observations", "unresolved", "items")
 
@@ -213,8 +212,7 @@ class PluginIntegrationTest < TestmonTestCase
         "EXECUTION_MARKER" => marker,
         "MINITEST_TESTMON" => "1",
         "MINITEST_TESTMON_MODE" => mode.to_s,
-        "MINITEST_TESTMON_DB" => File.join(directory, ".minitest-testmon.sqlite3"),
-        "MINITEST_TESTMON_REPORT" => File.join(directory, "tmp/minitest-testmon/report.json")
+        "MINITEST_TESTMON_DB" => File.join(directory, ".minitest-testmon.sqlite3")
       },
       RbConfig.ruby,
       "-I#{LIB_ROOT}",
@@ -225,6 +223,9 @@ class PluginIntegrationTest < TestmonTestCase
   end
 
   def read_report(directory)
-    JSON.parse(File.binread(File.join(directory, "tmp/minitest-testmon/report.json")))
+    store = Minitest::Testmon::Store.new(File.join(directory, ".minitest-testmon.sqlite3"))
+    report = store.report
+    store.close
+    report
   end
 end

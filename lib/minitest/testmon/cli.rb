@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
 require "optparse"
-require "fileutils"
+require "securerandom"
 
 module Minitest
   module Testmon
     class CLI
-      USAGE = "usage: minitest-testmon discover|run|explain"
+      USAGE = "usage: minitest-testmon discover|run|report|runs|explain"
 
       def self.start(arguments)
         cli = new(arguments)
@@ -37,6 +37,8 @@ module Minitest
         case command
         when "discover" then discover
         when "run" then run_tests
+        when "report" then show_report
+        when "runs" then show_runs
         when "explain" then explain
         when "help", "-h", "--help"
           @out.puts USAGE
@@ -49,44 +51,10 @@ module Minitest
 
       def write_invalid_configuration(error)
         @err.puts error.message
-        configuration = Testmon.configuration
-        path = configuration.report_path
-        previous = CanonicalJSON.parse(File.binread(path)) if File.file?(path)
-        report = invalid_configuration_report(previous)
-        AtomicFile.write(path, "#{CanonicalJSON.generate(report, pretty: true)}\n")
-        2
-      rescue
-        @err.puts error.message unless $!.equal?(error)
         2
       end
 
       private
-
-      def invalid_configuration_report(previous)
-        empty_observations = %w[claimed ignored uncovered unresolved].to_h do |name|
-          [name, {count: 0, items: []}]
-        end
-        empty_inventory = %w[claimed suite_scoped verified_empty unresolved].to_h do |name|
-          [name, {count: 0, items: []}]
-        end
-        {
-          schema_version: 2,
-          mode: %w[run discover].include?(@command_name) ? @command_name : "run",
-          ready: false,
-          generation: previous&.fetch("generation", nil),
-          context_signature: previous&.fetch("context_signature", nil) || Digest::SHA256.hexdigest("invalid_configuration"),
-          bundles: previous&.fetch("bundles", []) || [],
-          tests: {
-            discovered: previous&.dig("tests", "discovered") || [],
-            selected: [],
-            executed: []
-          },
-          observations: empty_observations,
-          inventory: previous&.fetch("inventory", nil) || empty_inventory,
-          suggestions: [],
-          publication: {published: false, reason: "invalid_configuration"}
-        }
-      end
 
       def discover
         separator = @arguments.index("--")
@@ -117,14 +85,14 @@ module Minitest
         snapshot = Testmon.registry.snapshot(configuration)
         store = Store.new(configuration.database_path)
         if snapshot.context.diagnostics.any?
-          write_parent_rejected_report(configuration, snapshot, store, "provider_incomplete")
+          write_parent_rejected_report(snapshot, store, "provider_incomplete")
           store.close
           return 4
         end
         selection = store.select(snapshot.context.artifacts, context_signature: snapshot.signature, roots: configuration.roots)
 
         if selection.reasons.include?("path_unresolved")
-          write_parent_rejected_report(configuration, snapshot, store, "provider_incomplete")
+          write_parent_rejected_report(snapshot, store, "provider_incomplete")
           store.close
           return 4
         end
@@ -145,7 +113,9 @@ module Minitest
           )
           payload = report.to_h.merge(inventory: store.published_inventory || report.to_h.fetch(:inventory))
           json = CanonicalJSON.generate(payload, pretty: true)
-          AtomicFile.write(configuration.report_path, "#{json}\n")
+          run_id = SecureRandom.uuid
+          store.begin_run(run_id:, mode: :run, context_signature: snapshot.signature)
+          store.record_report(run_id, report)
           @out.puts json
           store.close
           return 0
@@ -168,14 +138,16 @@ module Minitest
 
       def spawn_test_command(command, configuration, selection, mode:, context_signature: nil, snapshot_digest: nil)
         @fresh_report_bytes = nil
-        FileUtils.mkdir_p(File.dirname(configuration.report_path))
-        previous_report = report_identity(configuration.report_path)
+        run_id = SecureRandom.uuid
+        store = Store.new(configuration.database_path)
+        store.begin_run(run_id:, mode:, context_signature:)
+        store.close
         rails_root = configuration.project_root if rails_full_suite_command?(command, configuration)
         environment = {
           "MINITEST_TESTMON" => "1",
           "MINITEST_TESTMON_MODE" => mode.to_s,
           "MINITEST_TESTMON_DB" => configuration.database_path,
-          "MINITEST_TESTMON_REPORT" => configuration.report_path
+          "MINITEST_TESTMON_RUN_ID" => run_id
         }
         if selection
           environment["MINITEST_TESTMON_SELECTION"] = CanonicalJSON.generate({
@@ -200,7 +172,14 @@ module Minitest
         end
         Process.wait(pid)
         status = $?.exitstatus || 4
-        report = read_fresh_report(configuration.report_path, previous_report, mode)
+        store = Store.new(configuration.database_path)
+        report = store.report(run_id)
+        store.close
+        if report && valid_testmon_report?(report, mode)
+          @fresh_report_bytes = "#{CanonicalJSON.generate(report, pretty: true)}\n"
+        else
+          report = nil
+        end
         if status.zero?
           return 4 unless report
 
@@ -209,27 +188,6 @@ module Minitest
             (mode == :discover || %w[provider_incomplete worker_incomplete].include?(unpublished_reason))
         end
         status
-      end
-
-      def report_identity(path)
-        stat = File.stat(path)
-        [stat.dev, stat.ino, stat.size, stat.mtime.to_r, stat.ctime.to_r]
-      rescue SystemCallError
-        nil
-      end
-
-      def read_fresh_report(path, previous_identity, mode)
-        identity = report_identity(path)
-        return unless identity && identity != previous_identity
-
-        bytes = File.binread(path)
-        report = CanonicalJSON.parse(bytes)
-        return unless valid_testmon_report?(report, mode)
-
-        @fresh_report_bytes = bytes
-        report
-      rescue JSON::ParserError, SystemCallError
-        nil
       end
 
       def valid_testmon_report?(report, mode)
@@ -263,47 +221,53 @@ module Minitest
         parse_common!(@arguments, keep_paths: true)
         configuration = configured
         store = Store.new(configuration.database_path)
-        rows = store.explain(@arguments)
-        @out.puts CanonicalJSON.generate({generation: store.generation, explanations: rows}, pretty: true)
+        requested_generation = @options[:generation] || store.generation
+        rows = store.explain(@arguments, generation: requested_generation)
+        @out.puts CanonicalJSON.generate({generation: requested_generation, explanations: rows}, pretty: true)
         store.close
         0
       end
 
-      def write_parent_rejected_report(configuration, snapshot, store, reason)
-        if File.file?(configuration.report_path)
-          payload = CanonicalJSON.parse(File.binread(configuration.report_path))
-          payload["ready"] = false
-          payload["mode"] = "run"
-          payload["publication"] = {"published" => false, "reason" => reason}
-          payload["tests"] = {
-            "discovered" => Array(payload.dig("tests", "discovered")),
-            "selected" => [],
-            "executed" => []
-          }
-          payload["observations"] = %w[claimed ignored uncovered unresolved].to_h do |category|
-            [category, {"count" => 0, "items" => []}]
-          end
-          AtomicFile.write(configuration.report_path, "#{CanonicalJSON.generate(payload, pretty: true)}\n")
-        else
-          report = snapshot.observe(tests: {discovered: []}, selected: [], mode: :run)
-            .finalize
-            .with_generation(store.generation)
-            .unpublished(reason)
-          report.write(configuration.report_path)
-        end
-      rescue JSON::ParserError, SystemCallError
+      def write_parent_rejected_report(snapshot, store, reason)
         report = snapshot.observe(tests: {discovered: []}, selected: [], mode: :run)
           .finalize
           .with_generation(store.generation)
           .unpublished(reason)
-        report.write(configuration.report_path)
+        run_id = SecureRandom.uuid
+        store.begin_run(run_id:, mode: :run, context_signature: snapshot.signature)
+        store.record_report(run_id, report)
+      end
+
+      def show_report
+        parse_common!(@arguments, keep_paths: true)
+        raise OptionParser::InvalidArgument, "report accepts at most one RUN_ID" if @arguments.length > 1
+        store = Store.new(report_database_path)
+        report = store.report(@arguments.first)
+        store.close
+        raise Error, "report_not_found" unless report
+        @out.puts CanonicalJSON.generate(report, pretty: true)
+        0
+      end
+
+      def show_runs
+        parse_common!(@arguments)
+        store = Store.new(report_database_path)
+        rows = store.runs(limit: @options.fetch(:limit, 20))
+        store.close
+        @out.puts CanonicalJSON.generate({runs: rows}, pretty: true)
+        0
+      end
+
+      def report_database_path
+        File.expand_path(@options[:database] || Configuration::DEFAULT_DATABASE, Dir.pwd)
       end
 
       def parse_common!(arguments, keep_paths: false)
         parser = OptionParser.new do |options|
           options.on("--config PATH") { |path| @options[:config] = File.expand_path(path) }
           options.on("--database PATH") { |path| @options[:database] = path }
-          options.on("--report PATH") { |path| @options[:report] = path }
+          options.on("--generation N", Integer) { |value| @options[:generation] = value }
+          options.on("--limit N", Integer) { |value| @options[:limit] = value }
         end
         keep_paths ? parser.order!(arguments) : parser.parse!(arguments)
       end
@@ -325,7 +289,6 @@ module Minitest
         end
         configuration = Testmon.configuration
         configuration.database(@options[:database]) if @options[:database]
-        configuration.report(@options[:report]) if @options[:report]
         snapshot = configuration.snapshot
         if rails_root && snapshot.project_root != rails_root
           raise OptionParser::InvalidArgument, rails_project_root_usage

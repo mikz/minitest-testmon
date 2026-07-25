@@ -15,6 +15,8 @@ module Minitest
         @snapshot = registry.snapshot(@configuration)
         @store = Store.new(@configuration.database_path)
         @mode = ENV.fetch("MINITEST_TESTMON_MODE", "run").to_sym
+        @run_id = ENV["MINITEST_TESTMON_RUN_ID"] || SecureRandom.uuid
+        @store.begin_run(run_id: @run_id, mode: @mode, context_signature: @snapshot.signature)
         @process_parallel = false
         @exit_state = nil
       end
@@ -200,7 +202,6 @@ module Minitest
       end
 
       def prepare_process_run
-        @run_id = SecureRandom.uuid
         @worker_count = rails_executor.size.to_i
       end
 
@@ -280,7 +281,6 @@ module Minitest
       end
 
       def write_rejected_report(reason, discovered)
-        previous = previous_report_for_rejection(reason)
         selected = if @selection
           selected_tests(discovered, @selection)
         else
@@ -303,44 +303,8 @@ module Minitest
             resolver: @snapshot.context.resolver
           )
         end
-        if previous
-          previous["ready"] = false
-          previous["mode"] = @mode.to_s
-          previous["publication"] = {"published" => false, "reason" => reason}
-          previous["tests"] = {
-            "discovered" => discovered.map(&:to_s).uniq.sort,
-            "selected" => [],
-            "executed" => []
-          }
-          previous["observations"] = %w[claimed ignored uncovered unresolved].to_h do |category|
-            [category, {"count" => 0, "items" => []}]
-          end
-          AtomicFile.write(@configuration.report_path, "#{CanonicalJSON.generate(previous, pretty: true)}\n")
-        else
-          inventory = @store.published_inventory
-          if inventory
-            payload = report.to_h.merge(inventory: inventory)
-            AtomicFile.write(
-              @configuration.report_path,
-              "#{CanonicalJSON.generate(payload, pretty: true)}\n"
-            )
-          else
-            report.write(@configuration.report_path)
-          end
-        end
-      rescue PhaseError
-        nil
-      end
-
-      def previous_report_for_rejection(reason)
-        return unless reason == "unsupported_parallelism"
-        return unless File.file?(@configuration.report_path)
-        payload = CanonicalJSON.parse(File.binread(@configuration.report_path))
-        return unless payload["context_signature"] == @snapshot.signature
-        return unless payload["generation"] == @store.generation
-        return unless payload["inventory"].is_a?(Hash)
-        payload
-      rescue JSON::ParserError, SystemCallError
+        @store.record_report(@run_id, report)
+      rescue Error, SQLite3::Exception, SystemCallError
         nil
       end
     end
@@ -387,47 +351,37 @@ module Minitest
         @runtime.merge_worker_spools!
         report = @session.finalize
         published = if @mode == :discover
-          @store.publish(report, outcomes: @outcomes)
+          @store.publish(report, outcomes: @outcomes, run_id: @runtime.instance_variable_get(:@run_id))
         elsif @runtime.selection.none?
           generation = @store.generation
           if report.complete?
-            @store.release_lease!
-            report.certified(generation)
+            certified = report.certified(generation)
+            @store.certify(certified, run_id: @runtime.instance_variable_get(:@run_id))
           else
-            @store.publish(report, outcomes: @outcomes)
+            @store.publish(report, outcomes: @outcomes, run_id: @runtime.instance_variable_get(:@run_id))
           end
         else
           publication_reason = @runtime.selection.reasons.find do |reason|
             %w[cache_corrupt_rebuilt context_changed].include?(reason)
           end
-          @store.publish(report, outcomes: @outcomes, publication_reason: publication_reason)
+          @store.publish(
+            report,
+            outcomes: @outcomes,
+            publication_reason: publication_reason,
+            run_id: @runtime.instance_variable_get(:@run_id)
+          )
         end
-        write_report(published)
         @runtime.infrastructure_failure!(published.publication[:reason]) if !published.publication[:published] &&
           published.publication[:reason] != "test_failure"
       rescue => error
         @runtime.infrastructure_failure!(:provider_incomplete)
         warn error.message
         rejected = report&.with_generation(@store.generation)&.unpublished("provider_incomplete")
-        write_report(rejected) if rejected
+        @store.record_report(@runtime.instance_variable_get(:@run_id), rejected) if rejected && @store.connected?
       ensure
         @store.reconnect! if @runtime.process_parallel? && !@store.connected? && Process.pid == @runtime.instance_variable_get(:@parent_pid)
         @store.release_lease! if @store.connected?
         @store.close
-      end
-
-      private
-
-      def write_report(report)
-        inventory = @store.published_inventory
-        return report.write(@configuration.report_path) unless inventory
-
-        payload = report.to_h.merge(inventory: inventory)
-        AtomicFile.write(
-          @configuration.report_path,
-          "#{CanonicalJSON.generate(payload, pretty: true)}\n"
-        )
-        @configuration.report_path
       end
     end
   end

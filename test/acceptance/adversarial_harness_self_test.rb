@@ -150,7 +150,7 @@ class AdversarialHarnessSelfTest < Minitest::Test
     assert_includes lifecycle, "ADVERSARIAL_BACKGROUND_BOUNDARY"
     assert_includes lifecycle, "parallelize_me!"
     assert_includes acceptance, "File.mkfifo"
-    assert_includes acceptance, "baseline_bytes"
+    assert_includes acceptance, 'assert_equal baseline.fetch("generation"), report.fetch("generation")'
     refute_includes acceptance, "MINITEST_TESTMON_ACCEPTANCE_"
   end
 

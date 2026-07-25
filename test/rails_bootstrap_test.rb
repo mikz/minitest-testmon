@@ -18,7 +18,6 @@ class RailsBootstrapTest < TestmonTestCase
         end
 
         ENV["MINITEST_TESTMON_DB"] = File.join(Dir.pwd, "state.sqlite3")
-        ENV["MINITEST_TESTMON_REPORT"] = File.join(Dir.pwd, "report.json")
         ARGV.replace(["test"])
         require "minitest-testmon"
 
@@ -38,8 +37,7 @@ class RailsBootstrapTest < TestmonTestCase
 
   def test_conventional_entrypoint_rejects_invalid_options_without_loading_core
     cases = [
-      [%w[--testmon-db=state.sqlite3], /--testmon-db\/--testmon-report require --testmon/],
-      [%w[--testmon-report=report.json], /--testmon-db\/--testmon-report require --testmon/],
+      [%w[--testmon-db=state.sqlite3], /--testmon-db requires --testmon/],
       [%w[--testmon=value], /--testmon does not accept a value/]
     ]
     cases.each do |arguments, message|
@@ -131,7 +129,7 @@ class RailsBootstrapTest < TestmonTestCase
       _stdout, stderr, status = invoke_bootstrap(project, script)
 
       assert_equal 2, status.exitstatus
-      assert_match(/--testmon-db\/--testmon-report require --testmon/, stderr)
+      assert_match(/--testmon-db requires --testmon/, stderr)
       refute_match(/NameError|uninitialized constant|\n\s+from /, stderr)
       assert_equal "false", File.binread(feature_marker)
       refute File.exist?(test_marker)
@@ -442,7 +440,7 @@ class RailsBootstrapTest < TestmonTestCase
       assert status.success?, stderr
       assert_includes stdout, "--testmon"
       assert_includes stdout, "--testmon-db"
-      assert_includes stdout, "--testmon-report"
+      refute_includes stdout, "--testmon-report"
       assert_empty stderr
       refute File.exist?(File.join(project, ".minitest-testmon.sqlite3"))
       refute File.exist?(File.join(project, "tmp/minitest-testmon/discovery.json"))
@@ -493,7 +491,7 @@ class RailsBootstrapTest < TestmonTestCase
   def test_testmon_options_reject_non_default_rails_commands_before_activation
     [
       [%w[--testmon], false, false],
-      [%w[--testmon-report=tmp/report.json], false, true],
+      [%w[--testmon-db=tmp/state.sqlite3], false, true],
       [%w[--testmon], true, false]
     ].each do |arguments, test_command, rake_test_prepare|
       with_project do |project|
@@ -745,7 +743,6 @@ class RailsBootstrapTest < TestmonTestCase
         "MINITEST_TESTMON_RAILS_COMMAND" => nil,
         "MINITEST_TESTMON_RAILS_FLAG" => nil,
         "MINITEST_TESTMON_DB" => nil,
-        "MINITEST_TESTMON_REPORT" => nil,
         "DEFAULT_TEST" => nil,
         "DEFAULT_TEST_EXCLUDE" => nil
       },
@@ -780,6 +777,9 @@ class RailsBootstrapTest < TestmonTestCase
   end
 
   def read_report(project)
-    JSON.parse(File.binread(File.join(project, "tmp/minitest-testmon/discovery.json")))
+    store = Minitest::Testmon::Store.new(File.join(project, ".minitest-testmon.sqlite3"))
+    report = store.report
+    store.close
+    report
   end
 end

@@ -12,7 +12,6 @@ module MinitestTestmonAcceptance
   end
 
   class Driver
-    REPORT_PATH = Pathname("tmp/minitest-testmon/discovery.json")
     STATE_PATH = Pathname(".minitest-testmon.sqlite3")
 
     attr_reader :bin
@@ -49,10 +48,9 @@ module MinitestTestmonAcceptance
     end
 
     def report(project)
-      path = project.path.join(REPORT_PATH)
-      raise "missing public evidence report: #{path}" unless path.file?
-
-      JSON.parse(path.read)
+      result = invoke(project, "report")
+      raise "missing public evidence report: #{result.stderr}" unless result.success?
+      JSON.parse(result.stdout)
     end
 
     def state_path(project)

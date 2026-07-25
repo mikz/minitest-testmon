@@ -127,6 +127,7 @@ class StorageAcceptanceTest < Minitest::Test
         release = project.path.join("tmp/busy-owner-release")
         stdout = project.path.join("tmp/busy-owner.stdout")
         stderr = project.path.join("tmp/busy-owner.stderr")
+        FileUtils.mkdir_p(ready.dirname)
         before_quarantine = Dir[project.path.join(".minitest-testmon.sqlite3.corrupt-*-*")]
 
         owner_pid = Process.spawn(
@@ -143,6 +144,7 @@ class StorageAcceptanceTest < Minitest::Test
 
         busy = driver.run(project)
         refute busy.success?, "second runner waited for or stole the active SQLite owner"
+        assert_includes busy.stderr, "cache_lease_unavailable"
         busy_report = driver.report(project)
         assert_report_contract busy_report
         assert_equal false, busy_report.dig("publication", "published")

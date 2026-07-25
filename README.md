@@ -36,23 +36,16 @@ paths are available.
 A normal `bin/rails test`, console, server, runner, or plain help command only
 evaluates the lightweight entrypoint. It does not load the Minitest plugin or
 Testmon core, start an observer, or touch state files. Setting only
-`MINITEST_TESTMON_DB` or `MINITEST_TESTMON_REPORT` does not activate Testmon.
+`MINITEST_TESTMON_DB` does not activate Testmon.
 
-Create `.minitest-testmon.rb` only when the defaults need changing. Rails uses
-the canonical application root; generic commands use the wrapper's working
-directory. `lib/**/*.rb` and `test/**/*.rb` are already included.
+No setup file is required. The SQLite database defaults to
+`.minitest-testmon.sqlite3` and the configuration format to version 1. Rails
+uses the canonical application root; generic commands use the wrapper's
+working directory. `lib/**/*.rb` and `test/**/*.rb` are already included.
 
-```ruby
-# .minitest-testmon.rb
-Minitest::Testmon.configure do |config|
-  config.version 1
-  config.database ".minitest-testmon.sqlite3"
-  config.report "tmp/minitest-testmon/discovery.json"
-end
-```
-
+Create `.minitest-testmon.rb` only to override a default or add custom inputs.
 See the [configuration template](docs/templates/minitest-testmon.rb) for the
-available core settings.
+available settings.
 
 In Rails, `:project` is fixed to the canonical application root. A configuration
 that replaces it exits 2 before tests or state access. Declare additional named
@@ -60,39 +53,45 @@ roots for inputs outside the application instead.
 
 ## Run
 
-For Rails, use the ordinary command with one flag:
+For Rails, enable Testmon with an environment variable:
 
 ```sh
-bin/rails test --testmon
+MINITEST_TESTMON=1 bin/rails test
 ```
+
+`1`, `true`, `yes`, and `on` are accepted case-insensitively. `--testmon`
+remains available as an equivalent command-line form.
 
 The direct Rails interface accepts only the complete default suite. Test paths,
 `test:*` tasks, `--include`/`--name`, `--exclude`, `DEFAULT_TEST`, and
 `DEFAULT_TEST_EXCLUDE`, plus explicit Rails `--environment`/`-e` options, are
 unsupported. When Rails leaves enough information for the Railtie or Minitest
 plugin to inspect, Testmon rejects the invocation with exit 2 before its
-runtime, SQLite lease, report write, or any test body. Early boot observations
+runtime, SQLite lease, run receipt, or any test body. Early boot observations
 are discarded. Rails may consume, reinterpret, or reject some argument
 placements earlier, so their native diagnostics and ordering are not a Testmon
 API. Testmon performs its own selection after Rails has discovered the complete
 suite.
 
-Optional state paths belong after `--testmon`:
+Set an optional state path alongside environment activation:
 
 ```sh
-bin/rails test --testmon \
-  --testmon-db=tmp/testmon/state.sqlite3 \
-  --testmon-report=tmp/testmon/report.json
+MINITEST_TESTMON=1 \
+  MINITEST_TESTMON_DB=tmp/testmon/state.sqlite3 \
+  bin/rails test
 ```
 
-`--testmon-db` and `--testmon-report` without `--testmon` are usage errors.
-For direct Rails commands, the attached `=PATH` forms above are the supported
-syntax; a separated path can be consumed by Rails as a test path before
-Minitest sees it. Repeat `--testmon` is harmless.
+With command-line activation, the equivalent form is
+`bin/rails test --testmon --testmon-db=tmp/testmon/state.sqlite3`.
+`--testmon-db` without either environment or command-line activation is a usage
+error. For direct Rails commands, the attached `=PATH` form is supported; a
+separated path can be consumed by Rails as a test path before Minitest sees it.
+Repeat `--testmon` is harmless.
 
 Plain `bin/rails test --help` stays completely inert, so it cannot advertise
-Testmon's options. Use `bin/rails test --testmon --help` to load the option
-plugin and show them without starting the runtime.
+Testmon's options. Use `MINITEST_TESTMON=1 bin/rails test --help` (or
+`bin/rails test --testmon --help`) to load the option plugin and show them
+without starting the runtime.
 
 The first successful run builds the graph. A later run with no relevant change
 executes no tests. Exit 0 means the selected tests passed and the evidence was
@@ -102,7 +101,12 @@ inspect why a path selects tests:
 
 ```sh
 bundle exec minitest-testmon explain app/views/accounts/show.html.erb
+bundle exec minitest-testmon report
+bundle exec minitest-testmon runs
 ```
+
+If the database path is overridden, pass the same `--database PATH` to
+`report`, `runs`, and `explain`.
 
 The wrapper remains available for non-Rails commands and explicit Rails
 discovery or selection:
@@ -126,16 +130,16 @@ configuration and state there, runs the child from that root, and lets Bundler
 plus the Railtie activate observers at `before_configuration`. Other command
 shapes are rejected with exit 2 before spawn when either the configured project
 or a child-command token identifies a Rails application. The generic preload
-path is for non-Rails projects only. A successful child that produces no fresh
-valid report fails closed with exit 4.
+path is for non-Rails projects only. A successful child that produces no
+completed run receipt fails closed with exit 4.
 
 The wrapper rejects inherited `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` before
 spawn. The child plugin repeats that check after Rails boot so configuration or
 application code cannot turn a verified full-suite command into a partial run.
 
-The disposable SQLite cache lives at `.minitest-testmon.sqlite3`; the
-deterministic evidence report lives at
-`tmp/minitest-testmon/discovery.json`.
+SQLite stores the active graph, retained graph generations, and deterministic
+run receipts in `.minitest-testmon.sqlite3`. Read the latest receipt with
+`minitest-testmon report`; JSON is an output format, not a second state file.
 
 An already-skipped test is treated as a permanent dirty test: it publishes with
 no dependency edges and is selected on every run. An unchanged skip-only retry

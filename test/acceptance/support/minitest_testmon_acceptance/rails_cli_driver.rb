@@ -1,18 +1,17 @@
 # frozen_string_literal: true
 
 module MinitestTestmonAcceptance
-  RailsCliState = Data.define(:database_files, :report_bytes)
+  RailsCliState = Data.define(:database_files)
   RailsCliProcess = Data.define(:pid, :argv, :stdout_path, :stderr_path, :started_at)
 
   class RailsCliDriver
     DEFAULT_TIMEOUT = 45
 
-    attr_reader :state_path, :report_path
+    attr_reader :state_path
 
     def initialize(project)
       @project = project
       @state_path = project.path.join("tmp/rails-cli/state.sqlite3")
-      @report_path = project.path.join("tmp/rails-cli/report.json")
       verify_stock_command!
     end
 
@@ -43,7 +42,7 @@ module MinitestTestmonAcceptance
       timeout: DEFAULT_TIMEOUT
     )
       options = if explicit_paths
-        ["--database", state_path.to_s, "--report", report_path.to_s]
+        ["--database", state_path.to_s]
       else
         []
       end
@@ -83,9 +82,13 @@ module MinitestTestmonAcceptance
     end
 
     def report
-      raise "missing Rails CLI report: #{report_path}" unless report_path.file?
-
-      JSON.parse(report_path.read)
+      result = invoke(
+        [RbConfig.ruby, testmon_executable.to_s, "report", "--database", state_path.to_s],
+        env: {},
+        timeout: DEFAULT_TIMEOUT
+      )
+      raise "missing Rails CLI report: #{result.stderr}" unless result.success?
+      JSON.parse(result.stdout)
     end
 
     def published_inventory
@@ -149,10 +152,7 @@ module MinitestTestmonAcceptance
       database_files = Dir["#{state_path}*"].sort.to_h do |path|
         [File.basename(path), File.binread(path)]
       end
-      RailsCliState.new(
-        database_files:,
-        report_bytes: report_path.file? ? report_path.binread : nil
-      )
+      RailsCliState.new(database_files:)
     end
 
     def state_files
@@ -173,8 +173,7 @@ module MinitestTestmonAcceptance
 
     def activation_env
       {
-        "MINITEST_TESTMON_DB" => state_path.to_s,
-        "MINITEST_TESTMON_REPORT" => report_path.to_s
+        "MINITEST_TESTMON_DB" => state_path.to_s
       }
     end
 

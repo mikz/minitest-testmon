@@ -13,7 +13,7 @@ class RailsCliAcceptanceTest < Minitest::Test
         MinitestTestmonAcceptance::RailsCliOracle.assert_help!(
           result,
           state_files: cli.state_files,
-          report_exists: cli.report_path.exist?
+          report_exists: false
         )
       end
     end
@@ -27,7 +27,7 @@ class RailsCliAcceptanceTest < Minitest::Test
         MinitestTestmonAcceptance::RailsCliOracle.assert_plain_help!(
           result,
           state_files: cli.state_files,
-          report_exists: cli.report_path.exist?
+          report_exists: false
         )
       end
     end
@@ -40,7 +40,6 @@ class RailsCliAcceptanceTest < Minitest::Test
       result = cli.plain(
         env: runtime.env.merge(
           "MINITEST_TESTMON_DB" => cli.state_path.to_s,
-          "MINITEST_TESTMON_REPORT" => cli.report_path.to_s,
           "RAILS_ACCEPTANCE_TEST_MARKER" => marker.to_s,
           "RAILS_ACCEPTANCE_LOADED_FEATURES" => features.to_s
         )
@@ -50,7 +49,7 @@ class RailsCliAcceptanceTest < Minitest::Test
         MinitestTestmonAcceptance::RailsCliOracle.assert_inert!(
           result,
           state_files: cli.state_files,
-          report_exists: cli.report_path.exist?
+          report_exists: false
         )
       end
       refute_empty marker_test_ids(marker), "plain Rails command did not execute its suite"
@@ -60,6 +59,7 @@ class RailsCliAcceptanceTest < Minitest::Test
       active_testmon = loaded_testmon.reject do |path|
         [
           "/minitest-testmon.rb",
+          "/minitest/testmon/environment.rb",
           "/minitest/testmon/rails_bootstrap.rb",
           "/minitest/testmon/railtie.rb",
           "/minitest/testmon/version.rb"
@@ -69,7 +69,23 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_plain_db_and_report_environment_do_not_mutate_existing_state
+  def test_truthy_environment_value_activates_plain_rails_command
+    with_rails_cli_project do |_project, runtime, cli|
+      result = cli.plain(
+        env: runtime.env.merge(
+          "MINITEST_TESTMON" => "yes",
+          "MINITEST_TESTMON_DB" => cli.state_path.to_s
+        )
+      )
+
+      assert_equal 0, result.exitstatus, cli_failure("environment-activated Rails command", result)
+      report = cli.report
+      assert_report_contract report
+      assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_full_cold!(report) }
+    end
+  end
+
+  def test_plain_database_environment_does_not_mutate_existing_state
     with_rails_cli_project do |project, runtime, cli|
       learn_cli_baseline(project, runtime, cli)
       baseline = cli.snapshot
@@ -78,7 +94,6 @@ class RailsCliAcceptanceTest < Minitest::Test
       result = cli.plain(
         env: runtime.env.merge(
           "MINITEST_TESTMON_DB" => cli.state_path.to_s,
-          "MINITEST_TESTMON_REPORT" => cli.report_path.to_s,
           "RAILS_ACCEPTANCE_TEST_MARKER" => marker.to_s
         )
       )
@@ -89,19 +104,12 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_attached_database_and_report_options_override_environment_paths
+  def test_attached_database_option_overrides_environment_path
     with_rails_cli_project do |project, runtime, cli|
       env_database = project.path.join("tmp/rails-cli/env-trap.sqlite3")
-      env_report = project.path.join("tmp/rails-cli/env-trap.json")
       result = cli.flagged(
-        env: runtime.env.merge(
-          "MINITEST_TESTMON_DB" => env_database.to_s,
-          "MINITEST_TESTMON_REPORT" => env_report.to_s
-        ),
-        arguments: [
-          "--testmon-db=#{cli.state_path}",
-          "--testmon-report=#{cli.report_path}"
-        ]
+        env: runtime.env.merge("MINITEST_TESTMON_DB" => env_database.to_s),
+        arguments: ["--testmon-db=#{cli.state_path}"]
       )
 
       assert_equal 0, result.exitstatus, cli_failure("attached state/report options", result)
@@ -109,7 +117,6 @@ class RailsCliAcceptanceTest < Minitest::Test
       assert_report_contract report
       assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_full_cold!(report) }
       refute env_database.exist?, "environment database won over attached --testmon-db=PATH"
-      refute env_report.exist?, "environment report won over attached --testmon-report=PATH"
       assert_no_worker_spools project
       assert_equal 0, cli.lease_count
     end
@@ -143,7 +150,6 @@ class RailsCliAcceptanceTest < Minitest::Test
     outside = Pathname(Dir.mktmpdir("minitest-testmon-outside-rails-"))
     with_rails_cli_project do |project, runtime, cli|
       default_database = project.path.join(".minitest-testmon.sqlite3")
-      default_report = project.path.join("tmp/minitest-testmon/discovery.json")
 
       discovered = cli.wrapped(
         env: runtime.env,
@@ -152,7 +158,7 @@ class RailsCliAcceptanceTest < Minitest::Test
         chdir: outside
       )
       assert_equal 0, discovered.exitstatus, cli_failure("outside-cwd wrapped discovery", discovered)
-      cold = JSON.parse(default_report.read)
+      cold = MinitestTestmonAcceptance::Driver.new.report(project)
       assert_report_contract cold
       assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_full_cold!(cold) }
       assert default_database.file?, "wrapper created no default database under the Rails app root"
@@ -170,7 +176,7 @@ class RailsCliAcceptanceTest < Minitest::Test
 
       run = cli.wrapped(env: runtime.env, explicit_paths: false, chdir: outside)
       assert_equal 0, run.exitstatus, cli_failure("outside-cwd wrapped warm run", run)
-      warm = JSON.parse(default_report.read)
+      warm = MinitestTestmonAcceptance::Driver.new.report(project)
       assert_report_contract warm
       assert_cli_oracle do
         MinitestTestmonAcceptance::RailsCliOracle.assert_warm!(cold, warm, selected: [])
@@ -317,7 +323,7 @@ class RailsCliAcceptanceTest < Minitest::Test
             result,
             marker:,
             state_files: cli.state_files,
-            report_exists: cli.report_path.exist?
+            report_exists: false
           )
         end
       rescue Minitest::Assertion => error
@@ -343,7 +349,6 @@ class RailsCliAcceptanceTest < Minitest::Test
         assert_equal 2, result.exitstatus, cli_failure(label, result)
         refute marker.exist?, "#{label} reached a test body"
         assert_empty cli.state_files, "#{label} created Testmon state"
-        refute cli.report_path.exist?, "#{label} created a Testmon report"
         assert_no_worker_spools project
       rescue Minitest::Assertion => error
         flunk "#{label}: #{error.message}"
@@ -405,7 +410,6 @@ class RailsCliAcceptanceTest < Minitest::Test
         refute_equal 0, result.exitstatus, cli_failure("#{label} root replacement", result)
         refute marker.exist?, "#{label} root replacement reached a test body"
         assert_empty cli.state_files, "#{label} root replacement created direct state"
-        refute cli.report_path.exist?, "#{label} root replacement created a direct report"
         refute project.path.join(".minitest-testmon.sqlite3").exist?,
           "#{label} root replacement created default app state"
         refute project.path.join("tmp/minitest-testmon/discovery.json").exist?,

@@ -3,6 +3,38 @@
 require_relative "test_helper"
 
 class StoreTest < TestmonTestCase
+  def test_keeps_immutable_graph_generations_and_run_receipts
+    with_project do |project|
+      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
+      first = artifact_for("one")
+      first_run = SecureRandom.uuid
+      store.begin_run(run_id: first_run, mode: :run, context_signature: "context")
+      store.acquire_lease!(run_id: first_run)
+      store.publish(
+        report_for(first),
+        outcomes: {"ExampleTest#test_value" => :passed},
+        run_id: first_run
+      )
+
+      second = artifact_for("two")
+      second_run = SecureRandom.uuid
+      store.begin_run(run_id: second_run, mode: :run, context_signature: "context")
+      store.acquire_lease!(run_id: second_run)
+      store.publish(
+        report_for(second),
+        outcomes: {"ExampleTest#test_value" => :passed},
+        run_id: second_run
+      )
+
+      assert_equal "one", store.explain("example.rb", generation: 1).first.fetch(:fingerprint)
+      assert_equal "two", store.explain("example.rb", generation: 2).first.fetch(:fingerprint)
+      assert_equal 1, store.report(first_run).fetch("generation")
+      assert_equal 2, store.report(second_run).fetch("generation")
+      assert_equal [second_run, first_run], store.runs(limit: 2).map { |run| run.fetch("id") }
+      store.close
+    end
+  end
+
   def test_publish_select_explain_and_failure_rollback
     with_project do |project|
       path = File.join(project, "state.sqlite3")

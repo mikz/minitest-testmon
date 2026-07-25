@@ -9,18 +9,23 @@ bundle exec minitest-testmon discover -- bundle exec rake test
 bundle exec minitest-testmon discover -- bin/rails test
 ```
 
-The command writes `tmp/minitest-testmon/discovery.json` by default. A passing,
-complete discovery has `publication.published: true` and `ready: true`; the
-next unchanged `run` executes only permanent skips. A failed, incomplete, or
-source-racing discovery exits nonzero, remains unpublished, and preserves the
-last good generation and inventory. A skip in a new baseline can publish as a
-permanent dirty test with no dependency edges. A test which owned accepted
-edges and then starts skipping is rejected until a full recovery confirms the
-transition.
+The command stores its receipt in `.minitest-testmon.sqlite3` and prints the
+canonical JSON report to stdout. A passing, complete discovery has
+`publication.published: true` and `ready: true`; the next unchanged `run`
+executes only permanent skips. A failed, incomplete, or source-racing
+discovery exits nonzero, remains unpublished, and preserves the last good
+generation and inventory.
 
 ## Read the report
 
-Start with these fields:
+Read the latest retained receipt with `bundle exec minitest-testmon report`.
+Use `minitest-testmon runs` to list retained run IDs and
+`minitest-testmon report RUN_ID` for a specific receipt. Start with these
+fields:
+
+Testmon retains the latest 10 accepted graph generations and 100 completed or
+abandoned run receipts. When `config.database` overrides the default path,
+pass the same path to these commands with `--database PATH`.
 
 - `tests.discovered`, `selected`, and `executed` show the test boundary.
 - `bundles` lists exact provider IDs and versions.
@@ -82,8 +87,9 @@ bundle exec minitest-testmon explain PaymentsTest
 ```
 
 `explain` returns the logical path, facet, fingerprint, test ID, provider, and
-current generation. The SQLite cache is disposable implementation state; the
-CLI and discovery report are the supported diagnostic interfaces.
+current generation. Pass `--generation N` to inspect a retained graph
+generation. The CLI is the supported diagnostic interface; consumers do not
+inspect the SQLite schema directly.
 
 ## Fail-open outcomes
 

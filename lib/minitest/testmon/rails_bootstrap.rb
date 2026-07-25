@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "environment"
+
 module Minitest
   module Testmon
     module RailsBootstrap
@@ -15,7 +17,7 @@ module Minitest
       def call(arguments, application_root:, test_command:, rake_test_prepare:)
         argv = Array(arguments).map(&:to_s)
         option_request = argv.any? { |argument| argument.start_with?("--testmon") }
-        environment_request = ENV["MINITEST_TESTMON"] == "1"
+        environment_request = Environment.enabled?
         return false unless option_request || environment_request
 
         test_command = !!test_command
@@ -46,7 +48,7 @@ module Minitest
       end
 
       def requested?(arguments)
-        ENV["MINITEST_TESTMON"] == "1" ||
+        Environment.enabled? ||
           Array(arguments).any? { |argument| argument.to_s.start_with?("--testmon") }
       end
 

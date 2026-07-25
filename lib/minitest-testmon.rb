@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
-testmon_request = ENV["MINITEST_TESTMON"] == "1" ||
+require_relative "minitest/testmon/environment"
+
+testmon_request = Minitest::Testmon::Environment.enabled? ||
   ARGV.any? { |argument| argument.start_with?("--testmon") }
 
 if defined?(Rails::Railtie)

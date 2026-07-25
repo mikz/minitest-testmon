@@ -41,7 +41,7 @@ module RailsCliProductAcceptance
       repeated:,
       timeout:
     )
-    report = cli.report if cli.report_path.file?
+    report = cli.report if cli.state_path.file?
     assert_report_contract report if report
     [result, report]
   end
@@ -86,7 +86,6 @@ module RailsCliProductAcceptance
     refute_match(/(?:\tfrom |:\d+:in [`'])/, output, "configuration error exposed a Ruby backtrace")
     assert_operator output_lines.length, :<=, 12, "configuration error was not concise"
     assert_empty cli.state_files, "configuration error created Testmon state"
-    refute cli.report_path.exist?, "configuration error created a Testmon report"
     refute worker_spool.exist?, "configuration error created a worker spool"
     refute marker.exist?, "configuration error reached a test body"
   end

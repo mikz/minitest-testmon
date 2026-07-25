@@ -38,8 +38,11 @@ membership changes can select exact consumers instead of the full suite.
 Run the ordinary Rails command:
 
 ```sh
-bin/rails test --testmon
+MINITEST_TESTMON=1 bin/rails test
 ```
+
+`1`, `true`, `yes`, and `on` enable Testmon case-insensitively. The
+`--testmon` flag remains an equivalent command-line form.
 
 This direct interface is deliberately full-suite only. Test paths, `test:*`
 tasks, `--include`/`--name`, `--exclude`, `DEFAULT_TEST`, and
@@ -53,23 +56,26 @@ Similarly, Rails may consume or reject path, name, and environment argument
 placements before Testmon sees them. Those native diagnostics and their
 ordering are outside the Testmon contract.
 
-Use attached state overrides:
+Set an optional state path in the environment:
 
 ```sh
-bin/rails test --testmon \
-  --testmon-db=tmp/testmon/state.sqlite3 \
-  --testmon-report=tmp/testmon/report.json
+MINITEST_TESTMON=true \
+  MINITEST_TESTMON_DB=tmp/testmon/state.sqlite3 \
+  bin/rails test
 ```
 
-The separated `--testmon-db PATH` and `--testmon-report PATH` forms are not
-supported for direct Rails commands because Rails can treat `PATH` as a test
-path. The options require an exact `--testmon`. Invalid configuration also
-exits 2; incomplete evidence, an unavailable observer, a worker protocol
-failure, or cache contention exits 4. Ordinary Minitest failures keep exit 1.
+With command-line activation, the equivalent form is
+`bin/rails test --testmon --testmon-db=tmp/testmon/state.sqlite3`. The
+separated `--testmon-db PATH` form is not supported for direct Rails commands
+because Rails can treat `PATH` as a test path. The option requires activation
+through `MINITEST_TESTMON` or `--testmon`. Invalid configuration also exits 2;
+incomplete evidence, an unavailable observer, a worker protocol failure, or
+cache contention exits 4. Ordinary Minitest failures keep exit 1.
 
 Plain `bin/rails test --help` is intentionally inert and cannot advertise
-Testmon. `bin/rails test --testmon --help` loads only enough to show the
-Minitest options and creates no state.
+Testmon. `MINITEST_TESTMON=1 bin/rails test --help` (or
+`bin/rails test --testmon --help`) loads only enough to show the Minitest
+options and creates no state.
 
 The wrapper supports the exact complete-suite Rails command for discovery and
 selection:

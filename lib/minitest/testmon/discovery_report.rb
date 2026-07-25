@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require "fileutils"
 require "digest"
 
 module Minitest
@@ -123,11 +122,6 @@ module Minitest
 
       def to_json(pretty: false)
         CanonicalJSON.generate(to_h, pretty: pretty)
-      end
-
-      def write(path)
-        AtomicFile.write(path, "#{to_json(pretty: true)}\n")
-        path
       end
 
       private

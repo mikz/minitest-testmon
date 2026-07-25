@@ -12,14 +12,14 @@ class CLIIntegrationTest < TestmonTestCase
   def test_help_is_successful_and_invalid_usage_is_not
     stdout, stderr, help = Open3.capture3(RbConfig.ruby, EXECUTABLE, "--help")
     assert help.success?, stderr
-    assert_equal "usage: minitest-testmon discover|run|explain\n", stdout
+    assert_equal "usage: minitest-testmon discover|run|report|runs|explain\n", stdout
     assert_empty stderr
 
     stdout, stderr, invalid = Open3.capture3(RbConfig.ruby, EXECUTABLE, "unknown")
     refute invalid.success?
     assert_equal 2, invalid.exitstatus
     assert_empty stdout
-    assert_equal "usage: minitest-testmon discover|run|explain\n", stderr
+    assert_equal "usage: minitest-testmon discover|run|report|runs|explain\n", stderr
   end
 
   def test_discover_preloads_the_plugin_runs_every_test_and_preserves_failure_status
@@ -71,6 +71,44 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
+  def test_report_runs_and_historical_explain_read_sqlite_without_a_sidecar
+    with_cli_project do |directory, marker|
+      _stdout, stderr, cold = invoke(directory, marker, "run")
+      assert cold.success?, stderr
+
+      report_stdout, report_stderr, report_status = Open3.capture3(
+        RbConfig.ruby, EXECUTABLE, "report", chdir: directory
+      )
+      assert report_status.success?, report_stderr
+      report = JSON.parse(report_stdout)
+
+      runs_stdout, runs_stderr, runs_status = Open3.capture3(
+        RbConfig.ruby, EXECUTABLE, "runs", chdir: directory
+      )
+      assert runs_status.success?, runs_stderr
+      run_id = JSON.parse(runs_stdout).fetch("runs").first.fetch("id")
+
+      selected_stdout, selected_stderr, selected_status = Open3.capture3(
+        RbConfig.ruby, EXECUTABLE, "report", run_id, chdir: directory
+      )
+      assert selected_status.success?, selected_stderr
+      assert_equal report, JSON.parse(selected_stdout)
+
+      explain_stdout, explain_stderr, explain_status = Open3.capture3(
+        RbConfig.ruby,
+        EXECUTABLE,
+        "explain",
+        "--generation",
+        report.fetch("generation").to_s,
+        "lib/value.rb",
+        chdir: directory
+      )
+      assert explain_status.success?, explain_stderr
+      assert_equal report.fetch("generation"), JSON.parse(explain_stdout).fetch("generation")
+      refute File.exist?(File.join(directory, "tmp/minitest-testmon/discovery.json"))
+    end
+  end
+
   def test_custom_file_read_claim_is_learned_reselected_and_relearned_in_normal_runs
     with_cli_project do |directory, marker|
       _stdout, stderr, cold = invoke(directory, marker, "run")
@@ -116,7 +154,7 @@ class CLIIntegrationTest < TestmonTestCase
         File.binwrite(ENV.fetch("WRAPPER_MARKER"), JSON.generate({
           rubyopt: ENV.fetch("RUBYOPT", "<unset>"),
           database: ENV.fetch("MINITEST_TESTMON_DB"),
-          report: ENV.fetch("MINITEST_TESTMON_REPORT"),
+          run_id: ENV.fetch("MINITEST_TESTMON_RUN_ID"),
           config: ENV.fetch("MINITEST_TESTMON_CONFIG"),
           project_root: ENV.fetch("MINITEST_TESTMON_PROJECT_ROOT"),
           cwd: Dir.pwd
@@ -128,7 +166,6 @@ class CLIIntegrationTest < TestmonTestCase
         Minitest::Testmon.configure do |configuration|
           File.binwrite(ENV.fetch("CONFIG_MARKER"), configuration.project_root)
           configuration.database "tmp/wrapper-state.sqlite3"
-          configuration.report "tmp/wrapper-report.json"
         end
       RUBY
 
@@ -168,20 +205,23 @@ class CLIIntegrationTest < TestmonTestCase
       refute_includes environment.fetch("rubyopt"), "minitest/testmon_plugin"
       assert_equal canonical_root, File.binread(config_marker)
       assert_equal File.join(canonical_root, "tmp/wrapper-state.sqlite3"), environment.fetch("database")
-      assert_equal File.join(canonical_root, "tmp/wrapper-report.json"), environment.fetch("report")
+      assert_match(/\A[0-9a-f-]{36}\z/, environment.fetch("run_id"))
       assert_equal File.join(canonical_root, File.basename(config)), environment.fetch("config")
       assert_equal canonical_root, environment.fetch("project_root")
       assert_equal canonical_root, environment.fetch("cwd")
     end
   end
 
-  def test_zero_exit_with_a_fresh_invalid_report_fails_closed
+  def test_zero_exit_with_a_malformed_run_receipt_fails_closed
     with_project do |directory|
       command = write_file(File.join(directory, "write_invalid_report.rb"), <<~RUBY)
-        require "fileutils"
+        require "sqlite3"
 
-        FileUtils.mkdir_p(File.dirname(ENV.fetch("MINITEST_TESTMON_REPORT")))
-        File.binwrite(ENV.fetch("MINITEST_TESTMON_REPORT"), ENV.fetch("INVALID_REPORT"))
+        database = SQLite3::Database.new(ENV.fetch("MINITEST_TESTMON_DB"))
+        database.execute(
+          "UPDATE run_receipts SET state='complete', report_json=?, finished_at='now' WHERE id=?",
+          [ENV.fetch("INVALID_REPORT"), ENV.fetch("MINITEST_TESTMON_RUN_ID")]
+        )
       RUBY
       ["not json", JSON.generate({"valid_json" => "not a Testmon report"})].each do |payload|
         stdout, stderr, status = Open3.capture3(
@@ -201,10 +241,8 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def test_discover_never_prints_a_stale_preexisting_report
+  def test_discover_requires_its_exact_run_receipt
     with_project do |directory|
-      report_path = File.join(directory, "tmp/minitest-testmon/discovery.json")
-      write_file(report_path, "#{JSON.generate(valid_report(mode: "discover"))}\n")
       command = write_file(File.join(directory, "no_report.rb"), "# successful child without a report\n")
 
       stdout, stderr, status = Open3.capture3(
@@ -219,7 +257,7 @@ class CLIIntegrationTest < TestmonTestCase
 
       assert_equal 4, status.exitstatus, stderr
       assert_empty stdout
-      assert_equal valid_report(mode: "discover"), JSON.parse(File.binread(report_path))
+      refute File.exist?(File.join(directory, "tmp/minitest-testmon/discovery.json"))
     end
   end
 
@@ -314,7 +352,6 @@ class CLIIntegrationTest < TestmonTestCase
     with_project do |directory|
       marker = File.join(directory, "spawned.txt")
       state = write_file(File.join(directory, ".minitest-testmon.sqlite3"), "existing state")
-      report = write_file(File.join(directory, "tmp/minitest-testmon/discovery.json"), "existing report")
       rails = write_file(File.join(directory, "bin/rails"), <<~RUBY)
         #!/usr/bin/env ruby
         File.binwrite(ENV.fetch("SPAWN_MARKER"), "spawned")
@@ -338,7 +375,6 @@ class CLIIntegrationTest < TestmonTestCase
         assert_match(/remove #{filter}/, stderr)
         refute File.exist?(marker)
         assert_equal "existing state", File.binread(state)
-        assert_equal "existing report", File.binread(report)
       end
     end
   end
@@ -447,6 +483,9 @@ class CLIIntegrationTest < TestmonTestCase
   end
 
   def read_report(directory)
-    JSON.parse(File.binread(File.join(directory, "tmp/minitest-testmon/discovery.json")))
+    store = Minitest::Testmon::Store.new(File.join(directory, ".minitest-testmon.sqlite3"))
+    report = store.report
+    store.close
+    report
   end
 end

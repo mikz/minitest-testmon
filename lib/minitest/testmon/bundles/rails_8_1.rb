@@ -58,14 +58,27 @@ module Minitest
         end
 
         def view_roots
-          return [] unless defined?(ActionController::Base) && ActionController::Base.respond_to?(:view_paths)
-          paths = ActionController::Base.view_paths
-          paths = paths.paths if paths.respond_to?(:paths)
-          Array(paths).filter_map do |resolver|
+          paths = if defined?(ActionController::Base) && ActionController::Base.respond_to?(:view_paths)
+            value = ActionController::Base.view_paths
+            value.respond_to?(:paths) ? value.paths : value
+          else
+            []
+          end
+          roots = Array(paths).filter_map do |resolver|
             value = resolver.path if resolver.respond_to?(:path)
             value ||= resolver.to_path if resolver.respond_to?(:to_path)
             value&.to_s
           end
+          roots.concat(debug_view_roots)
+          roots.reject(&:empty?).uniq
+        end
+
+        def debug_view_roots
+          spec = Gem.loaded_specs["actionpack"]
+          return [] unless spec
+
+          path = File.join(spec.full_gem_path, "lib/action_dispatch/middleware/templates")
+          File.directory?(path) ? [path] : []
         end
 
         def fixture_roots

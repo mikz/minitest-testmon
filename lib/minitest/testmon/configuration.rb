@@ -7,6 +7,8 @@ module Minitest
     class Configuration
       FORMAT_VERSION = 1
       DEFAULT_DATABASE = ".minitest-testmon.sqlite3"
+      DEFAULT_RETAINED_REPORTS = 10
+      NOT_PROVIDED = Object.new.freeze
 
       FileSetDefinition = Data.define(:name, :root, :base, :include_patterns, :exclude_patterns, :mode, :scope) do
         def signature
@@ -27,6 +29,7 @@ module Minitest
       def initialize(cwd: Dir.pwd)
         @version = FORMAT_VERSION
         @database_path = File.join(cwd, DEFAULT_DATABASE)
+        @retained_reports = DEFAULT_RETAINED_REPORTS
         @roots = {}
         @ruby_patterns = [[:project, "lib/**/*.rb"], [:project, "test/**/*.rb"]]
         @filesets = []
@@ -57,6 +60,16 @@ module Minitest
       def database(path)
         mutable!
         @database_path = File.expand_path(path, project_root)
+      end
+
+      def retained_reports(value = NOT_PROVIDED)
+        return @retained_reports if value.equal?(NOT_PROVIDED)
+        mutable!
+        integer = Integer(value)
+        raise ConfigurationError, "retained reports must be a positive integer" unless integer.positive?
+        @retained_reports = integer
+      rescue ArgumentError, TypeError
+        raise ConfigurationError, "retained reports must be a positive integer"
       end
 
       def ruby_files(*patterns, root: :project)

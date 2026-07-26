@@ -20,16 +20,18 @@ module Minitest
     class Store
       SCHEMA_VERSION = 4
       RETAIN_GENERATIONS = 10
-      RETAIN_RUNS = 100
       SchemaIncompatible = Class.new(StandardError)
 
       attr_reader :path, :recovery_reason, :recovered_run_id
 
-      def initialize(path)
+      def initialize(path, retained_reports: Configuration::DEFAULT_RETAINED_REPORTS)
         @path = File.expand_path(path)
+        @retained_reports = Integer(retained_reports)
+        raise ArgumentError, "retained reports must be a positive integer" unless @retained_reports.positive?
         @leased = false
         @lease_token = nil
         @lease_owner_pid = nil
+        @pending_abandonment = nil
         @recovery_reason = nil
         FileUtils.mkdir_p(File.dirname(@path))
         connect
@@ -37,11 +39,20 @@ module Minitest
         @recovery_reason ||= metadata("recovery_required")
       end
 
+      # standard:disable Lint/RescueException
       def close
-        release_lease! if @leased && @lease_owner_pid == Process.pid && connected?
-        @database&.close
-        @database = nil
+        release_error = nil
+        begin
+          release_lease! if @leased && @lease_owner_pid == Process.pid && connected?
+        rescue Exception => error
+          release_error = error
+        ensure
+          @database&.close
+          @database = nil
+        end
+        raise release_error if release_error
       end
+      # standard:enable Lint/RescueException
 
       def acquire_lease!(run_id: nil)
         raise PhaseError, "cache lease is already held" if @leased
@@ -91,6 +102,10 @@ module Minitest
         return false unless @leased
         return false unless @lease_owner_pid == Process.pid
         raise PhaseError, "cache store is disconnected" unless connected?
+        if @pending_abandonment
+          return true if abandon_publication(*@pending_abandonment)
+          raise LeaseUnavailable, "cache_lease_unavailable"
+        end
         @database.execute("BEGIN IMMEDIATE")
         verify_lease!
         @database.execute("DELETE FROM leases WHERE name = 'cache' AND token = ?", [@lease_token])
@@ -280,7 +295,9 @@ module Minitest
         end
 
         next_generation = (previous_generation || 0) + 1
-        inventory = report.to_h.fetch(:inventory)
+        published = report.published(next_generation, reason: publication_reason)
+        payload = published.to_h
+        inventory = payload.fetch(:inventory)
         @database.execute(
           "INSERT INTO graph_generations(id, context_signature, inventory_json, created_at) VALUES (?, ?, ?, ?)",
           [next_generation, report.context_signature, CanonicalJSON.generate(inventory), Time.now.utc.iso8601(6)]
@@ -319,21 +336,23 @@ module Minitest
         set_metadata("context_signature", report.context_signature)
         set_metadata("schema_version", SCHEMA_VERSION.to_s)
         @database.execute("DELETE FROM metadata WHERE key = 'recovery_required'")
-        published = report.published(next_generation, reason: publication_reason)
-        finalize_run(run_id, published)
+        finalize_run(run_id, published, payload:)
         finish_lease_transaction
         @recovery_reason = nil
         @recovered_run_id = nil
         published
-      rescue
+      # standard:disable Lint/RescueException
+      rescue Exception
         begin
           @database.execute("ROLLBACK")
         rescue
           nil
         end
-        release_lease! if @leased && connected?
+        @pending_abandonment = [run_id, "provider_incomplete"]
+        abandon_publication(run_id, "provider_incomplete") if @leased && connected?
         raise
       end
+      # standard:enable Lint/RescueException
 
       def explain(paths, generation: self.generation)
         terms = Array(paths).map(&:to_s)
@@ -368,6 +387,7 @@ module Minitest
           "INSERT OR IGNORE INTO run_receipts(id, mode, state, context_signature, base_generation_id, started_at) VALUES (?, ?, 'pending', ?, ?, ?)",
           [run_id.to_s, mode.to_s, context_signature, generation, Time.now.utc.iso8601(6)]
         )
+        prune_run_receipts
         run_id.to_s
       end
 
@@ -392,14 +412,18 @@ module Minitest
         finalize_run(run_id, report)
         finish_lease_transaction
         report
-      rescue
+      # standard:disable Lint/RescueException
+      rescue Exception
         begin
           @database.execute("ROLLBACK")
         rescue
           nil
         end
+        @pending_abandonment = [run_id, "provider_incomplete"]
+        abandon_publication(run_id, "provider_incomplete") if @leased && connected?
         raise
       end
+      # standard:enable Lint/RescueException
 
       def report(run_id = nil)
         row = if run_id
@@ -760,11 +784,13 @@ module Minitest
         ).map { |row| row.fetch("key") }
       end
 
-      def finalize_run(run_id, report)
+      def finalize_run(run_id, report, payload: nil)
         return report unless run_id
-        payload = report.to_h
-        inventory = published_inventory
-        payload = payload.merge(inventory:) if inventory
+        unless payload
+          payload = report.to_h
+          inventory = published_inventory
+          payload = payload.merge(inventory:) if inventory
+        end
         @database.execute(
           <<~SQL,
             INSERT INTO run_receipts(
@@ -800,6 +826,29 @@ module Minitest
         report
       end
 
+      # standard:disable Lint/RescueException
+      def abandon_publication(run_id, reason)
+        @database.execute("BEGIN IMMEDIATE")
+        verify_lease!
+        set_metadata("recovery_required", reason)
+        abandon_run(run_id, reason)
+        @database.execute("DELETE FROM leases WHERE name = 'cache' AND token = ?", [@lease_token])
+        @database.execute("COMMIT")
+        clear_lease
+        @pending_abandonment = nil
+        @recovery_reason = reason
+        @recovered_run_id = nil
+        true
+      rescue Exception
+        begin
+          @database.execute("ROLLBACK")
+        rescue
+          nil
+        end
+        false
+      end
+      # standard:enable Lint/RescueException
+
       def prune_history
         @database.execute(<<~SQL, [RETAIN_GENERATIONS])
           DELETE FROM graph_generations
@@ -809,13 +858,20 @@ module Minitest
             LIMIT -1 OFFSET ?
           )
         SQL
-        @database.execute(<<~SQL, [RETAIN_RUNS])
+        prune_run_receipts
+      end
+
+      def prune_run_receipts
+        @database.execute(<<~SQL, [@retained_reports])
           DELETE FROM run_receipts
           WHERE id IN (
             SELECT id FROM run_receipts
-            WHERE state != 'pending'
-            ORDER BY finished_at DESC, rowid DESC
+            ORDER BY started_at DESC, rowid DESC
             LIMIT -1 OFFSET ?
+          )
+          AND id NOT IN (
+            SELECT run_id FROM leases
+            WHERE name = 'cache' AND run_id IS NOT NULL
           )
         SQL
       end

@@ -13,7 +13,10 @@ module Minitest
         @parent_pid = Process.pid
         @configuration = configuration.snapshot
         @snapshot = registry.snapshot(@configuration)
-        @store = Store.new(@configuration.database_path)
+        @store = Store.new(
+          @configuration.database_path,
+          retained_reports: @configuration.retained_reports
+        )
         @mode = ENV.fetch("MINITEST_TESTMON_MODE", "run").to_sym
         @run_id = ENV["MINITEST_TESTMON_RUN_ID"] || SecureRandom.uuid
         @store.begin_run(run_id: @run_id, mode: @mode, context_signature: @snapshot.signature)
@@ -379,10 +382,29 @@ module Minitest
         rejected = report&.with_generation(@store.generation)&.unpublished("provider_incomplete")
         @store.record_report(@runtime.instance_variable_get(:@run_id), rejected) if rejected && @store.connected?
       ensure
-        @store.reconnect! if @runtime.process_parallel? && !@store.connected? && Process.pid == @runtime.instance_variable_get(:@parent_pid)
-        @store.release_lease! if @store.connected?
-        @store.close
+        close_store(preserving: $!)
       end
+
+      private
+
+      # standard:disable Lint/RescueException
+      def close_store(preserving:)
+        cleanup_error = nil
+        begin
+          @store.reconnect! if @runtime.process_parallel? && !@store.connected? && Process.pid == @runtime.instance_variable_get(:@parent_pid)
+          @store.release_lease! if @store.connected?
+        rescue Exception => error
+          cleanup_error = error
+        ensure
+          begin
+            @store.close
+          rescue Exception => error
+            cleanup_error ||= error
+          end
+        end
+        raise cleanup_error if cleanup_error && !preserving
+      end
+      # standard:enable Lint/RescueException
     end
   end
 end

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Store retained graph generations and discovery receipts in SQLite.
+- Keep the latest 10 run reports by default, with a configurable retention limit.
 - Replace the persistent JSON report with `minitest-testmon report`.
 - Remove report-path configuration, environment variables, and CLI flags.
 - Accept `1`, `true`, `yes`, and `on` in `MINITEST_TESTMON` as an alternative

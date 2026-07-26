@@ -8,9 +8,21 @@ class ConfigurationTest < TestmonTestCase
       configuration = Minitest::Testmon::Configuration.new(cwd: project)
 
       assert_equal File.join(project, ".minitest-testmon.sqlite3"), configuration.database_path
+      assert_equal 10, configuration.retained_reports
       refute_respond_to configuration, :report
       refute_respond_to configuration, :report_path
     end
+  end
+
+  def test_retained_reports_accepts_only_positive_integers
+    configuration = Minitest::Testmon::Configuration.new
+
+    configuration.retained_reports 25
+    assert_equal 25, configuration.retained_reports
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.retained_reports 0 }
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.retained_reports "many" }
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.retained_reports false }
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.retained_reports nil }
   end
 
   def test_versioned_snapshot_is_deterministic_and_immutable

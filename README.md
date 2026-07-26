@@ -140,6 +140,8 @@ application code cannot turn a verified full-suite command into a partial run.
 SQLite stores the active graph, retained graph generations, and deterministic
 run receipts in `.minitest-testmon.sqlite3`. Read the latest receipt with
 `minitest-testmon report`; JSON is an output format, not a second state file.
+The latest 10 run reports are retained by default. Set
+`config.retained_reports N` to choose a different positive limit.
 
 An already-skipped test is treated as a permanent dirty test: it publishes with
 no dependency edges and is selected on every run. An unchanged skip-only retry

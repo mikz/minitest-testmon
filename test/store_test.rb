@@ -3,6 +3,17 @@
 require_relative "test_helper"
 
 class StoreTest < TestmonTestCase
+  class MaterializationCountingReport < Minitest::Testmon::DiscoveryReport
+    class << self
+      attr_accessor :materializations
+    end
+
+    def to_h
+      self.class.materializations += 1
+      super
+    end
+  end
+
   def test_keeps_immutable_graph_generations_and_run_receipts
     with_project do |project|
       store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
@@ -32,6 +43,53 @@ class StoreTest < TestmonTestCase
       assert_equal 2, store.report(second_run).fetch("generation")
       assert_equal [second_run, first_run], store.runs(limit: 2).map { |run| run.fetch("id") }
       store.close
+    end
+  end
+
+  def test_keeps_only_the_configured_number_of_latest_run_reports
+    with_project do |project|
+      store = Minitest::Testmon::Store.new(
+        File.join(project, "state.sqlite3"),
+        retained_reports: 3
+      )
+      run_ids = 5.times.map do |index|
+        run_id = "run-#{index}"
+        store.begin_run(run_id:, mode: :run, context_signature: "context")
+        store.record_report(run_id, report_for(artifact_for(index.to_s)))
+        run_id
+      end
+
+      assert_equal run_ids.last(3).reverse, store.runs(limit: 10).map { |run| run.fetch("id") }
+      assert_nil store.report(run_ids.first)
+      refute_nil store.report(run_ids.last)
+      store.close
+    end
+  end
+
+  def test_bounds_pending_reports_without_pruning_the_active_leased_run
+    with_project do |project|
+      path = File.join(project, "state.sqlite3")
+      active = Minitest::Testmon::Store.new(path, retained_reports: 2)
+      active_run_id = "active-run"
+      active.begin_run(run_id: active_run_id, mode: :run, context_signature: "context")
+      active.acquire_lease!(run_id: active_run_id)
+
+      writer = Minitest::Testmon::Store.new(path, retained_reports: 2)
+      3.times do |index|
+        writer.begin_run(run_id: "pending-#{index}", mode: :run, context_signature: "context")
+      end
+
+      retained_while_active = writer.runs(limit: 10)
+      assert_equal 3, retained_while_active.length
+      assert_includes retained_while_active.map { |run| run.fetch("id") }, active_run_id
+      assert retained_while_active.all? { |run| run.fetch("state") == "pending" }
+
+      active.release_lease!
+      writer.begin_run(run_id: "pending-3", mode: :run, context_signature: "context")
+
+      assert_equal %w[pending-3 pending-2], writer.runs(limit: 10).map { |run| run.fetch("id") }
+      writer.close
+      active.close
     end
   end
 
@@ -554,7 +612,143 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_successful_publication_materializes_the_report_once
+    with_project do |project|
+      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
+      MaterializationCountingReport.materializations = 0
+      report = report_for(artifact_for("one"), report_class: MaterializationCountingReport)
+      run_id = SecureRandom.uuid
+
+      store.begin_run(run_id: run_id, mode: :run, context_signature: "context")
+      store.acquire_lease!(run_id: run_id)
+      published = store.publish(
+        report,
+        outcomes: {"ExampleTest#test_value" => :passed},
+        run_id: run_id
+      )
+
+      assert published.ready?
+      assert_equal 1, MaterializationCountingReport.materializations
+      store.close
+    end
+  end
+
+  def test_interrupt_rolls_back_publication_and_abandons_the_receipt_before_reporter_cleanup
+    with_project do |project|
+      path = File.join(project, "state.sqlite3")
+      run_id = SecureRandom.uuid
+      store = Minitest::Testmon::Store.new(path)
+      store.begin_run(run_id: run_id, mode: :run, context_signature: "context")
+      store.acquire_lease!(run_id: run_id)
+      database = store.instance_variable_get(:@database)
+      interrupted = false
+      cleanup_busy = false
+      database.define_singleton_method(:execute) do |sql, *binds, &block|
+        if !interrupted && sql.include?("INSERT INTO run_receipts")
+          interrupted = true
+          raise Interrupt, "forced Ctrl-C"
+        elsif interrupted && !cleanup_busy && sql == "BEGIN IMMEDIATE"
+          cleanup_busy = true
+          raise SQLite3::BusyException, "forced cleanup contention"
+        end
+        super(sql, *binds, &block)
+      end
+
+      error = assert_raises(Interrupt) do
+        reporter_for(
+          store,
+          report_for(artifact_for("one")),
+          outcomes: {"ExampleTest#test_value" => :passed},
+          run_id: run_id
+        ).report
+      end
+
+      assert_equal "forced Ctrl-C", error.message
+      inspected = Minitest::Testmon::Store.new(path)
+      assert_nil inspected.generation
+      receipt = inspected.runs(limit: 1).fetch(0)
+      assert_equal run_id, receipt.fetch("id")
+      assert_equal "abandoned", receipt.fetch("state")
+      assert_equal "provider_incomplete", receipt.fetch("publication_reason")
+      assert_equal "provider_incomplete", inspected.recovery_reason
+      assert inspected.acquire_lease!(run_id: SecureRandom.uuid)
+      assert inspected.release_lease!
+      inspected.close
+    end
+  end
+
+  def test_persistent_cleanup_contention_preserves_interrupt_for_dead_owner_recovery
+    skip "fork is required" unless Process.respond_to?(:fork)
+
+    with_project do |project|
+      path = File.join(project, "state.sqlite3")
+      run_id = SecureRandom.uuid
+      reader, writer = IO.pipe
+      child = fork do
+        reader.close
+        store = Minitest::Testmon::Store.new(path)
+        store.begin_run(run_id: run_id, mode: :run, context_signature: "context")
+        store.acquire_lease!(run_id: run_id)
+        database = store.instance_variable_get(:@database)
+        interrupted = false
+        database.define_singleton_method(:execute) do |sql, *binds, &block|
+          if !interrupted && sql.include?("INSERT INTO run_receipts")
+            interrupted = true
+            raise Interrupt, "forced Ctrl-C"
+          elsif interrupted && sql == "BEGIN IMMEDIATE"
+            raise SQLite3::BusyException, "persistent cleanup contention"
+          end
+          super(sql, *binds, &block)
+        end
+
+        begin
+          reporter_for(
+            store,
+            report_for(artifact_for("one")),
+            outcomes: {"ExampleTest#test_value" => :passed},
+            run_id: run_id
+          ).report
+        rescue Interrupt => error
+          writer.write(error.message)
+        ensure
+          writer.close
+        end
+        exit! 0
+      end
+      writer.close
+      message = reader.read
+      reader.close
+      _, status = Process.wait2(child)
+
+      assert status.success?
+      assert_equal "forced Ctrl-C", message
+      recovered = Minitest::Testmon::Store.new(path)
+      assert recovered.acquire_lease!(run_id: SecureRandom.uuid)
+      receipt = recovered.runs(limit: 1).fetch(0)
+      assert_equal run_id, receipt.fetch("id")
+      assert_equal "abandoned", receipt.fetch("state")
+      assert_equal "worker_incomplete", receipt.fetch("publication_reason")
+      assert recovered.release_lease!
+      recovered.close
+    end
+  end
+
   private
+
+  def reporter_for(store, report, outcomes:, run_id:)
+    runtime = Object.new
+    runtime.instance_variable_set(:@run_id, run_id)
+    runtime.define_singleton_method(:merge_worker_spools!) { true }
+    runtime.define_singleton_method(:process_parallel?) { false }
+    runtime.define_singleton_method(:infrastructure_failure!) { |_reason| true }
+    session = Object.new
+    session.define_singleton_method(:finalize) { report }
+    reporter = Minitest::Testmon::RuntimeReporter.new(
+      runtime, nil, session, store, nil, mode: :discover
+    )
+    reporter.instance_variable_set(:@outcomes, outcomes)
+    reporter
+  end
 
   def artifact_for(digest)
     Minitest::Testmon::Artifact.new(
@@ -564,9 +758,9 @@ class StoreTest < TestmonTestCase
     )
   end
 
-  def report_for(artifact)
+  def report_for(artifact, report_class: Minitest::Testmon::DiscoveryReport)
     observation = Minitest::Testmon::Observation.build(kind: :file_read, path: artifact.relative_path, operation: :read, test_id: "ExampleTest#test_value")
-    Minitest::Testmon::DiscoveryReport.new(
+    report_class.new(
       context_signature: "context",
       mode: :run,
       tests: {discovered: ["ExampleTest#test_value"], selected: ["ExampleTest#test_value"], executed: ["ExampleTest#test_value"]},

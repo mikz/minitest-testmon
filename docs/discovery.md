@@ -23,9 +23,12 @@ Use `minitest-testmon runs` to list retained run IDs and
 `minitest-testmon report RUN_ID` for a specific receipt. Start with these
 fields:
 
-Testmon retains the latest 10 accepted graph generations and 100 completed or
-abandoned run receipts. When `config.database` overrides the default path,
-pass the same path to these commands with `--database PATH`.
+Testmon retains the latest 10 accepted graph generations and 10 run reports.
+Pending, completed, and abandoned runs share this limit so interrupted runs
+cannot grow the database without bound. The active leased run is retained while
+it is running. Override the report limit with `config.retained_reports N`.
+When `config.database` overrides the default path, pass the same path to these
+commands with `--database PATH`.
 
 - `tests.discovered`, `selected`, and `executed` show the test boundary.
 - `bundles` lists exact provider IDs and versions.

@@ -78,4 +78,22 @@ class DiscoveryReportTest < TestmonTestCase
     assert_equal expected, report.send(:category, items.reverse).fetch(:items)
     assert_equal %w[alpha zeta], expected.map { |item| item.fetch(:provider) }
   end
+
+  def test_deduplicates_only_fully_equal_observations
+    existing = Minitest::Testmon::Observation.build(
+      kind: :file_read,
+      path: "/project/config/rules.yml",
+      operation: :read,
+      exists_at_observation: true
+    )
+    missing = existing.with(exists_at_observation: false)
+    assert_equal existing.key, missing.key
+
+    report = Minitest::Testmon::DiscoveryReport.new(
+      context_signature: "context",
+      observations: Array.new(20_000, existing) + Array.new(20_000, missing)
+    )
+
+    assert_equal [existing, missing], report.observations
+  end
 end

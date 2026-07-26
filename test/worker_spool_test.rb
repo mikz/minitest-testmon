@@ -87,6 +87,31 @@ class WorkerSpoolTest < TestmonTestCase
     assert_equal %i[boundary providers seal terminal seal abort], events
   end
 
+  def test_reporter_surfaces_cleanup_failure_after_successful_publication
+    runtime = Object.new
+    runtime.define_singleton_method(:merge_worker_spools!) { true }
+    runtime.define_singleton_method(:process_parallel?) { false }
+    runtime.define_singleton_method(:infrastructure_failure!) { |_reason| true }
+    published = Struct.new(:publication).new({published: true, reason: nil})
+    session = Object.new
+    session.define_singleton_method(:finalize) { published }
+    store = Object.new
+    store.define_singleton_method(:publish) { |_report, **_options| published }
+    store.define_singleton_method(:connected?) { true }
+    store.define_singleton_method(:release_lease!) { raise Minitest::Testmon::LeaseUnavailable, "forced cleanup failure" }
+    closed = false
+    store.define_singleton_method(:close) { closed = true }
+    reporter = Minitest::Testmon::RuntimeReporter.new(
+      runtime, nil, session, store, nil, mode: :discover
+    )
+
+    error = assert_raises(Minitest::Testmon::LeaseUnavailable) do
+      reporter.report
+    end
+    assert_equal "forced cleanup failure", error.message
+    assert closed
+  end
+
   def test_merge_rejects_a_sealed_spool_missing_an_expected_test
     with_project do |project|
       spool = build_spool(project)

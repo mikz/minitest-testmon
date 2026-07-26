@@ -40,7 +40,7 @@ module Minitest
           selected: Array(tests[:selected]).map(&:to_s).uniq.sort,
           executed: Array(tests[:executed]).map(&:to_s).uniq.sort
         }.freeze
-        @observations = observations.sort_by(&:key).freeze
+        @observations = observations.uniq.sort_by(&:key).freeze
         @artifacts = artifacts.sort_by(&:key).freeze
         @dependencies = dependencies.sort_by { |item| [item.test_id.to_s, item.artifact_key] }.freeze
         @observation_claims = observation_claims.transform_values { |keys| keys.uniq.sort }.freeze

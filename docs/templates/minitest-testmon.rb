@@ -10,6 +10,9 @@ Minitest::Testmon.configure do |config|
   # The SQLite state path is relative to :project.
   # config.database "tmp/minitest-testmon/state.sqlite3"
 
+  # Testmon retains the latest 10 run reports by default.
+  # config.retained_reports 25
+
   # Add another stable logical root when inputs live outside the project root.
   # config.root :shared, File.expand_path("../shared", __dir__)
   # config.ruby_files "lib/**/*.rb", root: :shared

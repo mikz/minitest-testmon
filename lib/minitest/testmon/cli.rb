@@ -83,7 +83,10 @@ module Minitest
           return spawn_test_command(command, configuration, nil, mode: :run)
         end
         snapshot = Testmon.registry.snapshot(configuration)
-        store = Store.new(configuration.database_path)
+        store = Store.new(
+          configuration.database_path,
+          retained_reports: configuration.retained_reports
+        )
         if snapshot.context.diagnostics.any?
           write_parent_rejected_report(snapshot, store, "provider_incomplete")
           store.close
@@ -139,7 +142,10 @@ module Minitest
       def spawn_test_command(command, configuration, selection, mode:, context_signature: nil, snapshot_digest: nil)
         @fresh_report_bytes = nil
         run_id = SecureRandom.uuid
-        store = Store.new(configuration.database_path)
+        store = Store.new(
+          configuration.database_path,
+          retained_reports: configuration.retained_reports
+        )
         store.begin_run(run_id:, mode:, context_signature:)
         store.close
         rails_root = configuration.project_root if rails_full_suite_command?(command, configuration)
@@ -172,7 +178,10 @@ module Minitest
         end
         Process.wait(pid)
         status = $?.exitstatus || 4
-        store = Store.new(configuration.database_path)
+        store = Store.new(
+          configuration.database_path,
+          retained_reports: configuration.retained_reports
+        )
         report = store.report(run_id)
         store.close
         if report && valid_testmon_report?(report, mode)

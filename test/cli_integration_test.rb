@@ -109,6 +109,19 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
+  def test_configured_report_retention_applies_to_cli_runs
+    with_cli_project(retained_reports: 2) do |directory, marker|
+      4.times do
+        _stdout, stderr, status = invoke(directory, marker, "run")
+        assert status.success?, stderr
+      end
+
+      store = Minitest::Testmon::Store.new(File.join(directory, ".minitest-testmon.sqlite3"))
+      assert_equal 2, store.runs(limit: 10).length
+      store.close
+    end
+  end
+
   def test_custom_file_read_claim_is_learned_reselected_and_relearned_in_normal_runs
     with_cli_project do |directory, marker|
       _stdout, stderr, cold = invoke(directory, marker, "run")
@@ -404,13 +417,14 @@ class CLIIntegrationTest < TestmonTestCase
     }
   end
 
-  def with_cli_project
+  def with_cli_project(retained_reports: nil)
     with_project do |directory|
       marker = "#{directory}-executions"
       write_file(File.join(directory, ".minitest-testmon.rb"), <<~RUBY)
         require "minitest/testmon"
 
         Minitest::Testmon.configure do |config|
+          #{"config.retained_reports #{retained_reports}" if retained_reports}
           config.provider :templates, version: 1 do |provider|
             provider.inventory :templates,
               root: :project,

@@ -6,6 +6,12 @@ module Minitest
       DIRECT_READS = %i[read binread readlines foreach].freeze
       INSTANCE_READS = %i[read readpartial sysread each_line gets readline readlines].freeze
       CONSTANT_REFERENCE = /\b[A-Z][A-Z0-9_]*(?:::[A-Z][A-Z0-9_]*)*\b/
+      MODULE_METHOD_ENUMERATORS = %i[
+        public_instance_methods
+        protected_instance_methods
+        private_instance_methods
+      ].map { |name| Module.instance_method(name) }.freeze
+      MODULE_METHOD_LOOKUP = Module.instance_method(:instance_method)
 
       def initialize(
         session,
@@ -327,11 +333,11 @@ module Minitest
         return unless @ruby_paths
 
         ObjectSpace.each_object(Module) do |owner|
-          method_names = owner.public_instance_methods(false) |
-            owner.protected_instance_methods(false) |
-            owner.private_instance_methods(false)
+          method_names = MODULE_METHOD_ENUMERATORS.reduce([]) do |names, enumerator|
+            names | enumerator.bind_call(owner, false)
+          end
           method_names.each do |method_name|
-            method = owner.instance_method(method_name)
+            method = MODULE_METHOD_LOOKUP.bind_call(owner, method_name)
             next unless ruby_path_allowed?(method.source_location&.first)
             install_target(RubyVM::InstructionSequence.of(method))
           rescue NameError, TypeError

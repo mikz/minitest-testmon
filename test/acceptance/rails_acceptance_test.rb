@@ -283,6 +283,7 @@ class RailsAcceptanceTest < Minitest::Test
         env: runtime.env.merge("RAILS_ACCEPTANCE_API_SNAPSHOT" => active_path.to_s)
       )
       assert active.success?, rails_failure("active Rails API probe", active)
+      refute_includes active.stderr, "ActiveSupport::Concurrency::LoadInterlockAwareMonitor"
       assert_equal JSON.parse(clean_path.read), JSON.parse(active_path.read),
         "observer changed Rails method owners, signatures, source locations, or ancestors"
     end

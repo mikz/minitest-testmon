@@ -129,6 +129,46 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
+  def test_preloaded_project_method_scan_does_not_dispatch_introspection_to_the_owner
+    with_project do |project|
+      script = write_file(File.join(project, "introspection_trap.rb"), <<~RUBY)
+        module TestmonIntrospectionTrap
+          def call
+            :called
+          end
+
+          class << self
+            def public_instance_methods(*) = raise "owner introspection dispatched"
+            def protected_instance_methods(*) = raise "owner introspection dispatched"
+            def private_instance_methods(*) = raise "owner introspection dispatched"
+            def instance_method(*) = raise "owner introspection dispatched"
+          end
+        end
+      RUBY
+      load script
+      session = RecordingSession.new
+      observer = Minitest::Testmon::CoreObserver.new(
+        session,
+        resolver: Minitest::Testmon::PathResolver.new(project: project),
+        ruby_paths: [script],
+        test_only: true,
+        observe_files: false,
+        boundary_tracker: Struct.new(:boundary_active?).new(false)
+      ).start
+
+      Minitest::Testmon::ExecutionContext.with_test("TargetTest#test_call") do
+        Object.new.extend(TestmonIntrospectionTrap).call
+      end
+      observer.close
+
+      observation = session.observations.find { |item| item.operation == :tracepoint_call }
+      refute_nil observation
+      assert_equal File.realpath(script), observation.path
+    ensure
+      Object.send(:remove_const, :TestmonIntrospectionTrap) if Object.const_defined?(:TestmonIntrospectionTrap, false)
+    end
+  end
+
   def test_comment_only_ruby_file_is_observed_without_a_target_trace
     with_project do |project|
       script = write_file(File.join(project, "empty_initializer.rb"), "# Configuration intentionally left blank.\n")

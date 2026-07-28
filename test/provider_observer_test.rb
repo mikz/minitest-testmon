@@ -9,6 +9,18 @@ class ProviderObserverTest < TestmonTestCase
     end
   end
 
+  module InspectShadowLoader
+    class << self
+      def inspect(value, max_depth = 2)
+        [value, max_depth]
+      end
+
+      def load_document(filename)
+        File.binread(filename)
+      end
+    end
+  end
+
   class DeclaredFixtureCase
     def self.fixture_table_names
       [:all]
@@ -88,6 +100,63 @@ class ProviderObserverTest < TestmonTestCase
       assert_equal %i[event lineno local method_id path], wrapper_methods
       assert_equal 1, report.dependencies.count { |item| item.test_id == "DocumentTest#test_invoice" }
       assert_equal :"documents@1", report.dependencies.fetch(0).provider
+    end
+  end
+
+  def test_tracepoint_owner_does_not_dispatch_inspect_to_the_observed_module
+    with_project do |project|
+      path = write_file(File.join(project, "documents", "invoice.txt"), "total")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :documents, version: 1 do
+        inventory :documents, root: :project, include: "documents/**/*.txt"
+        facet :content, inventory: :documents, digest: :content, granularity: :file
+        observe_tracepoint :document_read,
+          target: [ProviderObserverTest::InspectShadowLoader, :load_document],
+          path: ->(trace) { trace.local(:filename) }
+        claim :document_read, to: %i[documents content], path: :path
+      end
+      session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+
+      result = Minitest::Testmon::ExecutionContext.with_test("DocumentTest#test_invoice") do
+        InspectShadowLoader.load_document(path)
+      end
+      report = session.finalize
+
+      assert_equal "total", result
+      assert report.complete?
+      assert_equal "#<Class:ProviderObserverTest::InspectShadowLoader>",
+        report.observations.fetch(0).callsite.fetch(:owner)
+      assert_equal 1, report.dependencies.count { |item| item.test_id == "DocumentTest#test_invoice" }
+    end
+  end
+
+  def test_tracepoint_failure_for_an_inspect_shadowing_owner_does_not_escape_application_code
+    with_project do |project|
+      path = write_file(File.join(project, "documents", "invoice.txt"), "total")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :documents, version: 1 do
+        inventory :documents, root: :project, include: "documents/**/*.txt"
+        facet :content, inventory: :documents, digest: :content, granularity: :file
+        observe_tracepoint :document_read,
+          target: [ProviderObserverTest::InspectShadowLoader, :load_document],
+          path: ->(trace) { trace.local(:filename) },
+          details: ->(_trace) { {"unsupported" => Object.new} }
+        claim :document_read, to: %i[documents content], path: :path
+      end
+      session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+
+      result = Minitest::Testmon::ExecutionContext.with_test("DocumentTest#test_invoice") do
+        InspectShadowLoader.load_document(path)
+      end
+      report = session.finalize
+
+      assert_equal "total", result
+      refute report.complete?
+      assert_includes report.diagnostics, "noncanonical_observation"
+      observation = report.observations.fetch(0)
+      assert_equal :noncanonical_observation, observation.reason
+      assert_equal "#<Class:ProviderObserverTest::InspectShadowLoader>",
+        observation.callsite.fetch(:owner)
     end
   end
 

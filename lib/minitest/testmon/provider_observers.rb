@@ -245,7 +245,7 @@ module Minitest
         record(
           wrapper,
           operation: operation,
-          callsite: {path: trace.path, line: trace.lineno, owner: trace.defined_class&.to_s},
+          callsite: {path: trace.path, line: trace.lineno, owner: TraceOwner.label(trace.defined_class)},
           reason: reason
         )
       rescue => error
@@ -359,7 +359,11 @@ module Minitest
           provider: @definition.id.to_sym,
           operation: operation,
           test_id: ExecutionContext.current_test,
-          callsite: callsite || (trace && {path: trace.path, line: trace.lineno, owner: trace.defined_class&.to_s}),
+          callsite: callsite || (trace && {
+            path: trace.path,
+            line: trace.lineno,
+            owner: TraceOwner.label(trace.defined_class)
+          }),
           reason: reason,
           details: {"error" => error.class.name}.merge(details || {}).compact
         ))

@@ -204,7 +204,7 @@ module Minitest
 
       def observe_c_call(event)
         receiver = event.self
-        if event.method_id == :load && event.defined_class.to_s.include?("Kernel")
+        if event.method_id == :load && TraceOwner.label(event.defined_class).to_s.include?("Kernel")
           @pending_loads[Thread.current] = true
           return
         end
@@ -231,7 +231,7 @@ module Minitest
       end
 
       def observe_c_return(event)
-        if event.method_id == :load && event.defined_class.to_s.include?("Kernel")
+        if event.method_id == :load && TraceOwner.label(event.defined_class).to_s.include?("Kernel")
           @pending_loads.delete(Thread.current)
           return
         end
@@ -395,7 +395,7 @@ module Minitest
       def callsite(event)
         locator = project_locator(event.path)
         path = locator ? locator.key : event.path
-        {path: path, line: event.lineno, owner: event.defined_class&.to_s}
+        {path: path, line: event.lineno, owner: TraceOwner.label(event.defined_class)}
       end
 
       def resolve_feature(feature)

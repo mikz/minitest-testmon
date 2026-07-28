@@ -122,7 +122,7 @@ module Minitest
           end
           {
             class: callable.class.name,
-            owner: owner.respond_to?(:name) ? owner.name : owner&.to_s,
+            owner: TraceOwner.label(owner),
             name: callable.respond_to?(:name) ? callable.name&.to_s : nil,
             source: location && File.basename(location[0]),
             line: location && location[1],
@@ -137,7 +137,7 @@ module Minitest
           when Hash
             value.to_h { |key, item| [key.to_s, declaration_value(item)] }
           when Module
-            {constant: value.name || value.to_s}
+            {constant: TraceOwner.label(value)}
           when Method, UnboundMethod, Proc
             callable_signature(value)
           when Symbol

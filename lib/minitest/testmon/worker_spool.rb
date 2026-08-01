@@ -12,19 +12,19 @@ module Minitest
 
       attr_reader :temporary_path, :final_path
 
-      def initialize(directory:, run_id:, worker_number:, context_signature:, generation:)
+      def initialize(directory:, run_id:, worker_number:, context_signature:, base_revision:)
         @directory = File.join(directory, run_id)
         @run_id = run_id
         @worker_number = Integer(worker_number)
         @context_signature = context_signature
-        @generation = generation
+        @base_revision = base_revision
         FileUtils.mkdir_p(@directory)
         basename = format("%03d-%d.jsonl", @worker_number, Process.pid)
         @temporary_path = File.join(@directory, "#{basename}.tmp")
         @final_path = File.join(@directory, basename)
         @io = File.open(@temporary_path, File::WRONLY | File::CREAT | File::EXCL, 0o600)
         append(type: "start", run_id: @run_id, worker: @worker_number, pid: Process.pid,
-          context_signature: @context_signature, generation: @generation)
+          context_signature: @context_signature, base_revision: @base_revision)
       end
 
       def record_observation(observation)
@@ -59,7 +59,7 @@ module Minitest
         false
       end
 
-      def self.merge(directory:, run_id:, worker_count:, context_signature:, generation:, expected_tests: nil)
+      def self.merge(directory:, run_id:, worker_count:, context_signature:, base_revision:, expected_tests: nil)
         run_directory = File.join(directory, run_id)
         return WorkerMerge.new(observations: [], executed: [], complete: false) unless File.directory?(run_directory)
         return WorkerMerge.new(observations: [], executed: [], complete: false) unless Dir[File.join(run_directory, "*.tmp")].empty?
@@ -79,7 +79,7 @@ module Minitest
             run_id: run_id,
             worker_number: worker_number,
             context_signature: context_signature,
-            generation: generation
+            base_revision: base_revision
           )
           complete &&= parsed[:complete]
           observations.concat(parsed[:observations])
@@ -97,10 +97,6 @@ module Minitest
       end
 
       def self.discard_validated_run(project_root:, run_id:)
-        discard_run_directory(project_root, run_id)
-      end
-
-      def self.discard_incomplete_run(project_root:, run_id:)
         discard_run_directory(project_root, run_id)
       end
 
@@ -149,7 +145,7 @@ module Minitest
       end
       private_class_method :trusted_workers_root
 
-      def self.parse_file(path, run_id:, worker_number:, context_signature:, generation:)
+      def self.parse_file(path, run_id:, worker_number:, context_signature:, base_revision:)
         valid_start = false
         valid_finish = false
         body_valid = true
@@ -163,7 +159,7 @@ module Minitest
           if line_number == 1
             valid_start = entry["type"] == "start" && entry["run_id"] == run_id &&
               entry["worker"] == worker_number && entry["context_signature"] == context_signature &&
-              entry["generation"] == generation
+              entry["base_revision"] == base_revision
             next
           end
           if finished
@@ -199,22 +195,13 @@ module Minitest
         data[:scope] = data.fetch(:scope).to_sym
         data[:reason] = data[:reason]&.to_sym
         data[:callsite] = data[:callsite]&.transform_keys(&:to_sym)
-        data[:details] = symbolize_hash(data.fetch(:details, {}))
+        # Observation details are provider-owned canonical data. Preserve their
+        # JSON key shape; recursively symbolizing them changes the public
+        # extractor contract between serial and process-worker execution.
+        data[:details] = data.fetch(:details, {})
         Observation.new(**data)
       end
       private_class_method :deserialize_observation
-
-      def self.symbolize_hash(value)
-        case value
-        when Hash
-          value.to_h { |key, item| [key.to_sym, symbolize_hash(item)] }
-        when Array
-          value.map { |item| symbolize_hash(item) }
-        else
-          value
-        end
-      end
-      private_class_method :symbolize_hash
 
       private
 

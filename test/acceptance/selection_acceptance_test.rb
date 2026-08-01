@@ -5,13 +5,21 @@ require_relative "test_helper"
 class SelectionAcceptanceTest < Minitest::Test
   include ProductAcceptance
 
-  def test_iseq_fingerprint_ignores_comments_whitespace_and_source_line_moves
+  SUBJECT_CONSUMERS = %w[
+    test_alpha
+    test_beta
+    test_branch_operand
+    test_dispatch_operand
+    test_nested_block_operand
+    test_string_literal
+  ].freeze
+
+  def test_exact_byte_fingerprint_selects_file_consumers_for_comments_and_source_line_moves
     require_product!
 
     with_project("selection") do |project|
       baseline = learn_baseline(project)
-      alpha_id = find_test_id(baseline, "test_alpha")
-      beta_id = find_test_id(baseline, "test_beta")
+      expected = subject_consumers(baseline)
 
       original = project.read("lib/subject.rb")
       project.write("lib/subject.rb", "# moved without semantic change\n\n\n#{original}")
@@ -20,19 +28,18 @@ class SelectionAcceptanceTest < Minitest::Test
       assert result.success?, result.stderr
       report = driver.report(project)
       assert_report_contract report
-      refute_includes report.dig("tests", "selected"), alpha_id
-      refute_includes report.dig("tests", "selected"), beta_id
-      assert_empty report.dig("tests", "selected")
+      assert_equal expected, report.dig("tests", "selected")
+      assert_equal expected, report.dig("tests", "executed")
     end
   end
 
-  def test_iseq_semantic_change_selects_only_its_consumers
+  def test_ruby_file_semantic_change_selects_every_consumer_of_the_file
     require_product!
 
     with_project("selection") do |project|
       baseline = learn_baseline(project)
       alpha_id = find_test_id(baseline, "test_alpha")
-      beta_id = find_test_id(baseline, "test_beta")
+      expected = subject_consumers(baseline)
       exact_id = find_test_id(baseline, "test_exact_file_input")
 
       project.write("lib/subject.rb", project.read("lib/subject.rb").sub("1 + 1", "1 + 2"))
@@ -40,9 +47,8 @@ class SelectionAcceptanceTest < Minitest::Test
       refute result.success?, "semantic mutant should fail its known assertion"
       report = driver.report(project)
       assert_report_contract report
-      assert_equal [alpha_id], report.dig("tests", "selected")
-      assert_equal [alpha_id], report.dig("tests", "executed")
-      refute_includes report.dig("tests", "selected"), beta_id
+      assert_equal expected, report.dig("tests", "selected")
+      assert_equal expected, report.dig("tests", "executed")
       refute_includes report.dig("tests", "selected"), exact_id
 
       full_stdout, full_stderr, full_status = run_selector_disabled(project)
@@ -52,7 +58,7 @@ class SelectionAcceptanceTest < Minitest::Test
       explanation = driver.explain(project, alpha_id)
       assert explanation.success?, explanation.stderr
       assert_includes "#{explanation.stdout}\n#{explanation.stderr}", alpha_id
-      assert_match(/subject\.rb|ruby_iseq/, "#{explanation.stdout}\n#{explanation.stderr}")
+      assert_match(/subject\.rb|ruby_source/, "#{explanation.stdout}\n#{explanation.stderr}")
     end
   end
 
@@ -81,13 +87,12 @@ class SelectionAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_iseq_sibling_semantic_change_selects_the_sibling_consumer_only
+  def test_ruby_file_sibling_change_selects_every_consumer_of_the_file
     require_product!
 
     with_project("selection") do |project|
       baseline = learn_baseline(project)
-      alpha_id = find_test_id(baseline, "test_alpha")
-      beta_id = find_test_id(baseline, "test_beta")
+      expected = subject_consumers(baseline)
       exact_id = find_test_id(baseline, "test_exact_file_input")
 
       project.write("lib/subject.rb", project.read("lib/subject.rb").sub("2 + 2", "2 + 3"))
@@ -95,8 +100,8 @@ class SelectionAcceptanceTest < Minitest::Test
       refute result.success?, "sibling semantic mutant should fail its known assertion"
       report = driver.report(project)
       assert_report_contract report
-      assert_equal [beta_id], report.dig("tests", "selected")
-      refute_includes report.dig("tests", "selected"), alpha_id
+      assert_equal expected, report.dig("tests", "selected")
+      assert_equal expected, report.dig("tests", "executed")
       refute_includes report.dig("tests", "selected"), exact_id
 
       full_stdout, full_stderr, full_status = run_selector_disabled(project)
@@ -110,7 +115,7 @@ class SelectionAcceptanceTest < Minitest::Test
 
     with_project("selection") do |project|
       baseline = learn_baseline(project)
-      result = driver.discover(project)
+      result = driver.run(project, full: true)
       assert result.success?, result.stderr
       report = driver.report(project)
       assert_report_contract report
@@ -120,6 +125,10 @@ class SelectionAcceptanceTest < Minitest::Test
   end
 
   private
+
+  def subject_consumers(report)
+    SUBJECT_CONSUMERS.map { |fragment| find_test_id(report, fragment) }.sort
+  end
 
   def learn_baseline(project)
     result = driver.run(project)

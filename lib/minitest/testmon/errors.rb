@@ -6,7 +6,6 @@ module Minitest
     class ConfigurationError < Error; end
     class PhaseError < Error; end
     class PathError < Error; end
-    class UnsupportedISeq < Error; end
     class LeaseUnavailable < Error; end
     class UnsupportedParallelism < Error; end
     class ObserverUnavailable < Error; end

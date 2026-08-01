@@ -105,13 +105,14 @@ module Minitest
         key = [Thread.current.object_id, locator.absolute_path]
         return if @unattributed_execution[key]
         @unattributed_execution[key] = true
+        @session.incomplete(:ambiguous_context)
         safe_record(Observation.build(
           kind: :coverage_lines,
           provider: :"ruby@1",
           path: locator.absolute_path,
           operation: :unattributed_thread,
           scope: :suite,
-          reason: :late_activation,
+          reason: :ambiguous_context,
           exists_at_observation: true,
           details: {thread: Thread.current.object_id, line: event.lineno}
         ))

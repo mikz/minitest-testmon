@@ -26,6 +26,25 @@ class WorkerSpoolTest < TestmonTestCase
     end
   end
 
+  def test_round_trip_preserves_provider_owned_detail_key_shape
+    with_project do |project|
+      spool = build_spool(project)
+      item = Minitest::Testmon::Observation.build(
+        kind: :custom_lookup,
+        provider: :custom,
+        test_id: "ExampleTest#test_value",
+        details: {"path" => "config/value.yml", "nested" => {"value" => 1}}
+      )
+      spool.record_observation(item)
+      assert spool.complete!
+
+      round_trip = merge(project).observations.fetch(0)
+
+      assert_equal item.details, round_trip.details
+      assert_equal "config/value.yml", round_trip.details.fetch("path")
+    end
+  end
+
   def test_completion_failure_leaves_an_incomplete_spool_and_does_not_raise
     with_project do |project|
       spool = build_spool(project)
@@ -92,6 +111,12 @@ class WorkerSpoolTest < TestmonTestCase
     runtime.define_singleton_method(:merge_worker_spools!) { true }
     runtime.define_singleton_method(:process_parallel?) { false }
     runtime.define_singleton_method(:infrastructure_failure!) { |_reason| true }
+    runtime.define_singleton_method(:evidence) { |_report, _outcomes| :evidence }
+    runtime.define_singleton_method(:selection) do
+      Minitest::Testmon::Selection.new(
+        discovered: [], selected: [], reasons_by_test: {}, base_revision: nil
+      )
+    end
     published = Struct.new(:publication).new({published: true, reason: nil})
     session = Object.new
     session.define_singleton_method(:finalize) { published }
@@ -101,9 +126,7 @@ class WorkerSpoolTest < TestmonTestCase
     store.define_singleton_method(:release_lease!) { raise Minitest::Testmon::LeaseUnavailable, "forced cleanup failure" }
     closed = false
     store.define_singleton_method(:close) { closed = true }
-    reporter = Minitest::Testmon::RuntimeReporter.new(
-      runtime, nil, session, store, nil, mode: :discover
-    )
+    reporter = Minitest::Testmon::RuntimeReporter.new(runtime, nil, session, store, nil)
 
     error = assert_raises(Minitest::Testmon::LeaseUnavailable) do
       reporter.report
@@ -148,7 +171,7 @@ class WorkerSpoolTest < TestmonTestCase
 
       runtime.merge_worker_spools!
 
-      assert_equal [item], session.observations
+      assert_equal [item.with(details: {"lines" => [2]})], session.observations
       assert_equal ["ExampleTest#test_many"], session.executed
       assert_empty session.diagnostics
       refute File.exist?(File.dirname(spool.final_path))
@@ -247,7 +270,7 @@ class WorkerSpoolTest < TestmonTestCase
       run_id: RUN_ID,
       worker_number: 0,
       context_signature: "context",
-      generation: 1
+      base_revision: 1
     )
   end
 
@@ -257,7 +280,7 @@ class WorkerSpoolTest < TestmonTestCase
       run_id: RUN_ID,
       worker_number: 0,
       context_signature: "context",
-      generation: 1
+      base_revision: 1
     )
   end
 
@@ -268,7 +291,7 @@ class WorkerSpoolTest < TestmonTestCase
     runtime.instance_variable_set(:@run_id, RUN_ID)
     runtime.instance_variable_set(:@worker_count, 1)
     runtime.instance_variable_set(:@snapshot, Struct.new(:signature).new("context"))
-    runtime.instance_variable_set(:@selection, Struct.new(:generation).new(1))
+    runtime.instance_variable_set(:@selection, Struct.new(:base_revision).new(1))
     runtime.instance_variable_set(:@selected_tests, ["ExampleTest#test_many"])
     runtime.instance_variable_set(:@session, session)
     runtime.instance_variable_set(:@store, Struct.new(:reconnect!).new(true))
@@ -282,7 +305,7 @@ class WorkerSpoolTest < TestmonTestCase
       run_id: RUN_ID,
       worker_count: 1,
       context_signature: "context",
-      generation: 1,
+      base_revision: 1,
       expected_tests: expected_tests
     )
   end

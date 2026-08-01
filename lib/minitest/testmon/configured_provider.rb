@@ -197,7 +197,7 @@ module Minitest
         when %i[contents set]
           fingerprint, reason = contents_fingerprint(locators)
           [set_artifact(facet, locators, fingerprint, members: locators.map(&:key), reason: reason)]
-        when %i[ruby_iseq file]
+        when %i[ruby_source file]
           locators.flat_map { |locator| ruby_artifacts(facet, locator, context) }
         else
           raise ConfigurationError, "unsupported facet: #{facet.digest}/#{facet.granularity}"
@@ -210,30 +210,19 @@ module Minitest
       end
 
       def ruby_artifacts(facet, locator, context)
-        result = ISeqFingerprint.new(@resolver).call(locator.absolute_path)
+        result = RubyTraceCapabilityProbe.new(@resolver).call(locator.absolute_path)
         context.add_ruby_trace_capability(definition.id, locator, result.unhookable_targets)
         scope = result.target_traceable? ? facet.scope : :suite
-        if result.fallback?
-          return [artifact(
-            facet,
-            locator,
-            result.file_fingerprint,
-            identity: :whole_file,
-            reason: :whole_file_fallback,
-            scope: scope
-          )]
-        end
-
-        result.bodies.map do |body|
-          artifact(
-            facet,
-            locator,
-            Fingerprint.known(body.digest),
-            identity: body.identity,
-            members: ["identity:#{body.identity}", "type:#{body.type}", "label:#{body.label}", *body.lines.map { |line| "line:#{line}" }],
-            scope: scope
-          )
-        end
+        fingerprint = ContentFingerprint.call(locator.absolute_path)
+        [artifact(
+          facet,
+          locator,
+          fingerprint,
+          identity: :whole_file,
+          members: ["identity:whole_file"],
+          reason: fingerprint.reason,
+          scope: scope
+        )]
       end
 
       def artifact(facet, locator, fingerprint, identity:, members: [], reason: nil, scope: facet.scope)
@@ -263,13 +252,13 @@ module Minitest
         when :content, :contents then "content"
         when :existence then "existence"
         when :paths then "membership"
-        when :ruby_iseq then "ruby_iseq"
+        when :ruby_source then "ruby_source"
         else facet.digest.to_s
         end
       end
 
       def artifact_key(facet, root, relative_path, identity)
-        if facet.digest == :ruby_iseq
+        if facet.digest == :ruby_source
           return Digest::SHA256.hexdigest([
             "physical",
             root,
@@ -371,7 +360,7 @@ module Minitest
         selected = if facet.granularity == :set
           candidates
         elsif locator
-          matching_file_artifacts(candidates, locator, observation, facet)
+          matching_file_artifacts(candidates, locator)
         else
           []
         end
@@ -397,34 +386,10 @@ module Minitest
         false
       end
 
-      def matching_file_artifacts(candidates, locator, observation, facet)
-        matching = candidates.select do |item|
+      def matching_file_artifacts(candidates, locator)
+        candidates.select do |item|
           item.root == locator.root && item.relative_path == locator.relative_path
         end
-        return matching unless facet.digest == :ruby_iseq && matching.length > 1
-
-        method_id = observation.details[:method_id] || observation.details["method_id"]
-        lines = Array(observation.details[:lines] || observation.details["lines"]).map(&:to_i)
-        selected = if method_id
-          methods = matching.select do |item|
-            item.members.include?("label:#{method_id}") && item.members.include?("type:method")
-          end
-          identities = methods.flat_map { |item| item.members.grep(/\Aidentity:/) }
-          matching.select do |item|
-            identity = item.members.find { |member| member.start_with?("identity:") }
-            methods.include?(item) || identities.any? { |parent| identity&.start_with?("#{parent}/") }
-          end
-        elsif !lines.empty?
-          matching.select do |item|
-            body_lines = item.members.grep(/\Aline:/).map { |member| member.delete_prefix("line:").to_i }
-            !(body_lines & lines).empty?
-          end
-        elsif %i[ruby_script ruby_require].include?(observation.kind)
-          matching.select { |item| item.members.any? { |member| %w[type:top type:class].include?(member) } }
-        else
-          matching
-        end
-        selected.empty? ? matching : selected
       end
     end
   end

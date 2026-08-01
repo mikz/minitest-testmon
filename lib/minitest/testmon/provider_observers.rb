@@ -130,6 +130,15 @@ module Minitest
 
       private
 
+      # Internal provider primitive used by the core test-definition input.
+      # Keeping it private preserves the deliberately small provider wrapper
+      # API exposed to third-party built-in observers.
+      def __source_location
+        @test_class.instance_method(@name).source_location
+      rescue NameError
+        nil
+      end
+
       def canonical_class_value(value)
         case value
         when Symbol

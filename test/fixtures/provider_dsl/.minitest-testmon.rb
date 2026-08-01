@@ -177,12 +177,12 @@ Minitest::Testmon.configure do |config|
       base: ".",
       include: ["lib/**/*.rb"],
       exclude: []
-    provider.facet :iseq,
+    provider.facet :source,
       inventory: :sources,
-      digest: :ruby_iseq,
+      digest: :ruby_source,
       granularity: :file,
       scope: :test
-    provider.claim :file_read, to: [:sources, :iseq], path: :path
+    provider.claim :file_read, to: [:sources, :source], path: :path
   end
 
   config.fileset :compat_templates,
@@ -190,8 +190,7 @@ Minitest::Testmon.configure do |config|
     base: ".",
     include: ["compat/**/*.txt"],
     exclude: [],
-    mode: :contents,
-    scope: :test
+    mode: :contents
   config.fileset :compat_paths,
     root: :project,
     base: ".",

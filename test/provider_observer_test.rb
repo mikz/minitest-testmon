@@ -219,7 +219,7 @@ class ProviderObserverTest < TestmonTestCase
 
     assert_equal inventories.first, inventories.last
     claimed = inventories.first.fetch(:claimed).fetch(:items)
-    assert_equal 3, claimed.length
+    assert_equal 2, claimed.length
     claimed.each do |item|
       assert_equal(
         [
@@ -229,6 +229,10 @@ class ProviderObserverTest < TestmonTestCase
         item.fetch(:test_ids)
       )
     end
+    suite_scoped = inventories.first.fetch(:suite_scoped).fetch(:items)
+    assert_equal 1, suite_scoped.length
+    assert_equal "membership", suite_scoped.fetch(0).fetch(:facet)
+    assert_empty suite_scoped.fetch(0).fetch(:test_ids)
   end
 
   private

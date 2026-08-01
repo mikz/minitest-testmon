@@ -8,6 +8,7 @@ module Minitest
       FORMAT_VERSION = 1
       DEFAULT_DATABASE = ".minitest-testmon.sqlite3"
       DEFAULT_RETAINED_REPORTS = 10
+      DEFAULT_COMPLETE_SUITE_GLOBS = ["test/**/*_test.rb"].freeze
       NOT_PROVIDED = Object.new.freeze
 
       FileSetDefinition = Data.define(:name, :root, :base, :include_patterns, :exclude_patterns, :mode, :scope) do
@@ -31,6 +32,8 @@ module Minitest
         @database_path = File.join(cwd, DEFAULT_DATABASE)
         @retained_reports = DEFAULT_RETAINED_REPORTS
         @roots = {}
+        @complete_suite_globs = DEFAULT_COMPLETE_SUITE_GLOBS
+        @complete_suite_globs_customized = false
         @ruby_patterns = [[:project, "lib/**/*.rb"], [:project, "test/**/*.rb"]]
         @filesets = []
         @disabled_bundles = []
@@ -72,6 +75,30 @@ module Minitest
         raise ConfigurationError, "retained reports must be a positive integer"
       end
 
+      # Test-file globs whose exact set denotes a complete suite beyond the
+      # default one (the shape `bin/rails test:all` passes to Minitest). A
+      # profile/bundle declares its canonical value; a project may override it
+      # when its complete-suite command uses a different file list.
+      def complete_suite_globs(*patterns)
+        return @complete_suite_globs if patterns.empty?
+        mutable!
+        values = patterns.flatten.map { |pattern| String(pattern) }.uniq.sort
+        raise ConfigurationError, "complete suite globs must contain at least one pattern" if values.empty?
+        @complete_suite_globs_customized = true
+        @complete_suite_globs = values.freeze
+      rescue TypeError
+        raise ConfigurationError, "complete suite globs must contain strings"
+      end
+
+      # Profile/bundle entry point: declares the canonical globs without
+      # clobbering an explicit project configuration.
+      def default_complete_suite_globs(*patterns)
+        return @complete_suite_globs if @complete_suite_globs_customized
+        values = patterns.flatten.map { |pattern| String(pattern) }.uniq.sort.freeze
+        mutable!
+        @complete_suite_globs = values
+      end
+
       def ruby_files(*patterns, root: :project)
         mutable!
         validate_root!(root)
@@ -80,13 +107,13 @@ module Minitest
         end
       end
 
-      def fileset(name, include:, root: :project, base: ".", exclude: [], mode: :paths, scope: :test)
+      def fileset(name, include:, root: :project, base: ".", exclude: [], mode: :paths, scope: :suite)
         mutable!
         validate_root!(root)
         mode = mode.to_sym
         scope = scope.to_sym
         raise ConfigurationError, "fileset mode must be :paths or :contents" unless %i[paths contents].include?(mode)
-        raise ConfigurationError, "fileset scope must be :test or :suite" unless %i[test suite].include?(scope)
+        raise ConfigurationError, "filesets are always suite-scoped" unless scope == :suite
         raise ConfigurationError, "fileset #{name} is already configured" if @filesets.any? { |item| item.name == name.to_sym }
 
         definition = FileSetDefinition.new(
@@ -96,7 +123,7 @@ module Minitest
           include_patterns: Array(include).map(&:to_s).sort.freeze,
           exclude_patterns: Array(exclude).map(&:to_s).sort.freeze,
           mode: mode,
-          scope: scope
+          scope: :suite
         )
         @filesets << definition
         provider("fileset.#{definition.name}", version: 1) do
@@ -109,7 +136,7 @@ module Minitest
             inventory: definition.name,
             digest: (definition.mode == :paths) ? :paths : :contents,
             granularity: :set,
-            scope: definition.scope
+            scope: :suite
         end
       end
 

@@ -12,23 +12,23 @@ class CLIIntegrationTest < TestmonTestCase
   def test_help_is_successful_and_invalid_usage_is_not
     stdout, stderr, help = Open3.capture3(RbConfig.ruby, EXECUTABLE, "--help")
     assert help.success?, stderr
-    assert_equal "usage: minitest-testmon discover|run|report|runs|explain\n", stdout
+    assert_equal "usage: minitest-testmon run [--full]|report|runs|explain\n", stdout
     assert_empty stderr
 
     stdout, stderr, invalid = Open3.capture3(RbConfig.ruby, EXECUTABLE, "unknown")
     refute invalid.success?
     assert_equal 2, invalid.exitstatus
     assert_empty stdout
-    assert_equal "usage: minitest-testmon discover|run|report|runs|explain\n", stderr
+    assert_equal "usage: minitest-testmon run [--full]|report|runs|explain\n", stderr
   end
 
-  def test_discover_preloads_the_plugin_runs_every_test_and_preserves_failure_status
+  def test_forced_run_preloads_the_plugin_runs_every_discovered_test_and_preserves_failure_status
     with_cli_project do |directory, marker|
-      _stdout, stderr, status = invoke(directory, marker, "discover", {"PLANT_FAILURE" => "1"})
+      _stdout, stderr, status = invoke(directory, marker, "run", {"PLANT_FAILURE" => "1"}, full: true)
 
       refute status.success?, stderr
       report = read_report(directory)
-      assert_equal "discover", report.fetch("mode")
+      assert_equal "run", report.fetch("mode")
       assert_equal report.dig("tests", "discovered"), report.dig("tests", "selected")
       assert_equal report.dig("tests", "discovered"), report.dig("tests", "executed")
       assert_equal 2, report.dig("tests", "executed").length
@@ -36,20 +36,20 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def test_successful_discover_publishes_a_warm_baseline
+  def test_successful_forced_run_publishes_a_warm_baseline
     with_cli_project do |directory, marker|
-      _stdout, stderr, discovered = invoke(directory, marker, "discover")
-      assert discovered.success?, stderr
-      discovery_report = read_report(directory)
-      assert_equal true, discovery_report.dig("publication", "published")
-      assert_equal discovery_report.dig("tests", "discovered"), discovery_report.dig("tests", "executed")
+      _stdout, stderr, forced = invoke(directory, marker, "run", full: true)
+      assert forced.success?, stderr
+      run_report = read_report(directory)
+      assert_equal true, run_report.dig("publication", "published")
+      assert_equal run_report.dig("tests", "discovered"), run_report.dig("tests", "executed")
 
       _stdout, stderr, warm = invoke(directory, marker, "run")
       assert warm.success?, stderr
       warm_report = read_report(directory)
       assert_empty warm_report.dig("tests", "selected")
       assert_empty warm_report.dig("tests", "executed")
-      assert_equal 1, File.readlines(marker).length
+      assert_equal 2, File.readlines(marker).length
     end
   end
 
@@ -67,7 +67,84 @@ class CLIIntegrationTest < TestmonTestCase
       assert_empty warm_report.dig("tests", "selected")
       assert_empty warm_report.dig("tests", "executed")
       assert_equal cold_report.fetch("generation"), warm_report.fetch("generation")
-      assert_equal 1, File.readlines(marker).length
+      assert_equal 2, File.readlines(marker).length
+    end
+  end
+
+  def test_selection_is_computed_after_minitest_applies_the_original_name_filter
+    with_cli_project do |directory, marker|
+      _stdout, stderr, filtered = invoke(
+        directory,
+        marker,
+        "run",
+        {},
+        test_arguments: ["--name", "/test_failure_status/"]
+      )
+      assert filtered.success?, stderr
+      filtered_report = read_report(directory)
+      assert_equal ["ValueTest#test_failure_status"], filtered_report.dig("tests", "discovered")
+      assert_equal ["ValueTest#test_failure_status"], filtered_report.dig("tests", "selected")
+      assert_equal ["ValueTest#test_failure_status"], filtered_report.dig("tests", "executed")
+
+      _stdout, stderr, wider = invoke(directory, marker, "run")
+      assert wider.success?, stderr
+      wider_report = read_report(directory)
+      assert_equal 2, wider_report.dig("tests", "discovered").length
+      assert_equal ["ValueTest#test_plugin_is_registered_once"], wider_report.dig("tests", "selected")
+      assert_equal ["ValueTest#test_plugin_is_registered_once"], wider_report.dig("tests", "executed")
+    end
+  end
+
+  def test_narrow_then_wide_run_preserves_suite_membership_checksums_per_test
+    with_cli_project do |directory, marker|
+      _stdout, stderr, narrow = invoke(
+        directory, marker, "run", {}, test_arguments: ["--name", "/test_failure_status/"]
+      )
+      assert narrow.success?, stderr
+      write_file(File.join(directory, "templates/added.txt"), "added\n")
+
+      _stdout, stderr, wide = invoke(directory, marker, "run")
+      assert wide.success?, stderr
+      report = read_report(directory)
+      assert_equal report.dig("tests", "discovered"), report.dig("tests", "selected")
+      assert_equal report.dig("tests", "selected"), report.dig("tests", "executed")
+    end
+  end
+
+  def test_narrow_then_wide_run_preserves_context_checksums_per_test
+    with_cli_project do |directory, marker|
+      _stdout, stderr, narrow = invoke(
+        directory, marker, "run", {}, test_arguments: ["--name", "/test_failure_status/"]
+      )
+      assert narrow.success?, stderr
+      configuration = File.join(directory, ".minitest-testmon.rb")
+      File.binwrite(configuration, File.binread(configuration).sub("version: 1", "version: 2"))
+
+      _stdout, stderr, wide = invoke(directory, marker, "run")
+      assert wide.success?, stderr
+      report = read_report(directory)
+      assert_equal report.dig("tests", "discovered"), report.dig("tests", "selected")
+      assert_equal report.dig("tests", "selected"), report.dig("tests", "executed")
+    end
+  end
+
+  def test_a_new_generated_runnable_is_discovered_before_warm_cache_selection
+    with_cli_project do |directory, marker|
+      _stdout, stderr, cold = invoke(directory, marker, "run")
+      assert cold.success?, stderr
+
+      _stdout, stderr, generated = invoke(
+        directory,
+        marker,
+        "run",
+        {"GENERATED_CASES" => "late"}
+      )
+      assert generated.success?, stderr
+      report = read_report(directory)
+      generated_id = "ValueTest#test_generated_late"
+      assert_includes report.dig("tests", "discovered"), generated_id
+      assert_equal [generated_id], report.dig("tests", "selected")
+      assert_equal [generated_id], report.dig("tests", "executed")
     end
   end
 
@@ -152,7 +229,7 @@ class CLIIntegrationTest < TestmonTestCase
       )
       assert relearned.success?, stderr
       assert_empty read_report(directory).dig("tests", "selected")
-      assert_equal 2, File.readlines(marker).length
+      assert_equal 4, File.readlines(marker).length
     end
   end
 
@@ -191,8 +268,8 @@ class CLIIntegrationTest < TestmonTestCase
           command = [
             RbConfig.ruby,
             EXECUTABLE,
-            "discover",
-            "--",
+            "run",
+            "--full", "--",
             launcher,
             "test"
           ]
@@ -241,8 +318,8 @@ class CLIIntegrationTest < TestmonTestCase
           {"INVALID_REPORT" => payload},
           RbConfig.ruby,
           EXECUTABLE,
-          "discover",
-          "--",
+          "run",
+          "--full", "--",
           RbConfig.ruby,
           command,
           chdir: directory
@@ -254,15 +331,30 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def test_discover_requires_its_exact_run_receipt
+  def test_report_validation_requires_complete_and_diagnostics
+    cli = Minitest::Testmon::CLI.new([])
+    report = valid_report(mode: "run")
+
+    assert cli.send(:valid_testmon_report?, report)
+    refute cli.send(:valid_testmon_report?, report.except("complete"))
+    refute cli.send(:valid_testmon_report?, report.merge("diagnostics" => [1]))
+    refute cli.send(:valid_testmon_report?, report.merge("diagnostics" => ["source_drift"]))
+    refute cli.send(:valid_testmon_report?, report.merge("complete" => false))
+    refute cli.send(:valid_testmon_report?, report.merge("publication" => {"published" => false, "reason" => nil}))
+
+    incomplete = report.merge("complete" => false, "ready" => false, "diagnostics" => [])
+    assert cli.send(:valid_testmon_report?, incomplete)
+  end
+
+  def test_forced_run_requires_its_exact_run_receipt
     with_project do |directory|
       command = write_file(File.join(directory, "no_report.rb"), "# successful child without a report\n")
 
       stdout, stderr, status = Open3.capture3(
         RbConfig.ruby,
         EXECUTABLE,
-        "discover",
-        "--",
+        "run",
+        "--full", "--",
         RbConfig.ruby,
         command,
         chdir: directory
@@ -295,14 +387,14 @@ class CLIIntegrationTest < TestmonTestCase
             {"SPAWN_MARKER" => marker},
             RbConfig.ruby,
             EXECUTABLE,
-            "discover",
-            "--",
+            "run",
+            "--full", "--",
             *child_command,
             chdir: caller
           )
 
           assert_equal 2, status.exitstatus, [stdout, stderr].join("\n")
-          assert_match(/exact bin\/rails test command/, stderr)
+          assert_match(/exact bin\/rails test or bin\/rails test:all command/, stderr)
           refute File.exist?(marker)
         end
       end
@@ -311,8 +403,8 @@ class CLIIntegrationTest < TestmonTestCase
         {"SPAWN_MARKER" => marker},
         RbConfig.ruby,
         EXECUTABLE,
-        "discover",
-        "--",
+        "run",
+        "--full", "--",
         RbConfig.ruby,
         "-e",
         'File.binwrite(ENV.fetch("SPAWN_MARKER"), "spawned")',
@@ -320,7 +412,7 @@ class CLIIntegrationTest < TestmonTestCase
       )
 
       assert_equal 2, status.exitstatus, [stdout, stderr].join("\n")
-      assert_match(/exact bin\/rails test command/, stderr)
+      assert_match(/exact bin\/rails test or bin\/rails test:all command/, stderr)
       refute File.exist?(marker)
     end
   end
@@ -345,8 +437,8 @@ class CLIIntegrationTest < TestmonTestCase
           {"SPAWN_MARKER" => marker},
           RbConfig.ruby,
           EXECUTABLE,
-          "discover",
-          "--",
+          "run",
+          "--full", "--",
           rails,
           "test",
           chdir: directory
@@ -377,8 +469,8 @@ class CLIIntegrationTest < TestmonTestCase
           {"SPAWN_MARKER" => marker, filter => "test/example_test.rb"},
           RbConfig.ruby,
           EXECUTABLE,
-          "discover",
-          "--",
+          "run",
+          "--full", "--",
           rails,
           "test",
           chdir: directory
@@ -398,7 +490,9 @@ class CLIIntegrationTest < TestmonTestCase
     {
       "schema_version" => 2,
       "mode" => mode,
+      "complete" => true,
       "ready" => true,
+      "diagnostics" => [],
       "generation" => 1,
       "context_signature" => "test-context",
       "bundles" => ["ruby@1"],
@@ -467,6 +561,10 @@ class CLIIntegrationTest < TestmonTestCase
             flunk "planted failure" if ENV["PLANT_FAILURE"] == "1"
             pass
           end
+
+          ENV.fetch("GENERATED_CASES", "").split(",").reject(&:empty?).each do |name|
+            define_method("test_generated_\#{name}") { assert_equal name, name }
+          end
         end
       RUBY
       write_file(File.join(directory, "run_tests.rb"), <<~RUBY)
@@ -480,14 +578,16 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def invoke(directory, marker, mode, environment = {})
+  def invoke(directory, marker, mode, environment = {}, test_arguments: [], full: false)
+    verb = [mode, ("--full" if full)].compact
     command = [
       RbConfig.ruby,
       EXECUTABLE,
-      mode,
+      *verb,
       "--",
       RbConfig.ruby,
-      "run_tests.rb"
+      "run_tests.rb",
+      *test_arguments
     ]
     Open3.capture3(
       {"EXECUTION_MARKER" => marker}.merge(environment),

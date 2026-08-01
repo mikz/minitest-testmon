@@ -49,23 +49,4 @@ class FingerprintTest < TestmonTestCase
       FileUtils.remove_entry(outside) if outside && File.exist?(outside)
     end
   end
-
-  def test_fileset_paths_and_contents_have_distinct_semantics
-    with_project do |project|
-      path = write_file(File.join(project, "features", "one.feature"), "Feature: one\n")
-      configuration = Minitest::Testmon::Configuration.new(cwd: project)
-      configuration.fileset :paths, include: ["features/**/*.feature"], mode: :paths
-      configuration.fileset :contents, include: ["features/**/*.feature"], mode: :contents
-      configuration.snapshot
-      resolver = Minitest::Testmon::PathResolver.new(configuration.roots)
-      fingerprinter = Minitest::Testmon::FileSetFingerprint.new(resolver)
-
-      before_paths = fingerprinter.call(configuration.filesets.find { |item| item.name == :paths }).fingerprint.digest
-      before_contents = fingerprinter.call(configuration.filesets.find { |item| item.name == :contents }).fingerprint.digest
-      File.binwrite(path, "Feature: changed\n")
-
-      assert_equal before_paths, fingerprinter.call(configuration.filesets.find { |item| item.name == :paths }).fingerprint.digest
-      refute_equal before_contents, fingerprinter.call(configuration.filesets.find { |item| item.name == :contents }).fingerprint.digest
-    end
-  end
 end

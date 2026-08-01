@@ -36,7 +36,8 @@ module MinitestTestmonAcceptance
 
     def wrapped(
       env:,
-      mode: "run",
+      full: false,
+      command: "test",
       explicit_paths: true,
       chdir: @project.path,
       timeout: DEFAULT_TIMEOUT
@@ -46,15 +47,18 @@ module MinitestTestmonAcceptance
       else
         []
       end
+      # `full` forces a full relearn (`run --full`); the old `discover` verb.
+      flags = full ? ["--full"] : []
       invoke(
         [
           RbConfig.ruby,
           testmon_executable.to_s,
-          mode,
+          "run",
+          *flags,
           *options,
           "--",
           rails_bin,
-          "test"
+          command
         ],
         env:,
         timeout:,

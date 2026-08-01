@@ -7,7 +7,8 @@ application-specific loader.
 Every supported input follows the same model:
 
 1. **Inventory** declares the complete candidate file set before selection.
-2. **Facets** say what can change: file contents, set membership, or both.
+2. **Facets** say what can change. Every inventory automatically gets one
+   suite-scoped path-membership facet; providers usually add file-content facets.
 3. **Observations and claims** connect a public runtime signal to declared
    artifacts for the current test.
 
@@ -56,8 +57,8 @@ input format a provider can inventory, not a second configuration language.
 ## Copyable YAML provider
 
 This provider inventories all application settings, fingerprints each file,
-fingerprints the set of paths, observes `YAML.load_file`, and claims both facets
-for the calling test:
+observes `YAML.load_file`, and claims the matching content for the calling test.
+The builder adds the inventory's suite-scoped membership checksum automatically:
 
 ```ruby
 # .minitest-testmon.rb
@@ -77,12 +78,6 @@ Minitest::Testmon.configure do |config|
       granularity: :file,
       scope: :test
 
-    facet :yaml_membership,
-      inventory: :yaml,
-      digest: :paths,
-      granularity: :set,
-      scope: :test
-
     observe_tracepoint :yaml_read,
       target: [YAML, :load_file],
       event: :call,
@@ -92,9 +87,6 @@ Minitest::Testmon.configure do |config|
     claim :yaml_read,
       to: [:yaml, :yaml_content],
       path: :path
-
-    claim :yaml_read,
-      to: [:yaml, :yaml_membership]
   end
 end
 ```
@@ -112,10 +104,11 @@ observe_tracepoint :yaml_read,
   path: ->(trace) { trace.local(:path) }
 ```
 
-An edit to an existing settings file changes its `yaml_content` artifact. An
-addition, deletion, or rename changes the single `yaml_membership` artifact.
-Claiming both means a test which performs settings lookup is selected for either
-kind of change, including the appearance of a previously missing optional file.
+An edit to an existing settings file changes its `yaml_content` input and selects
+the tests that loaded it. An addition, deletion, or rename changes the automatic
+membership input and conservatively selects every discovered test. Testmon does
+not infer from a successful loader call that the same signal observes failed
+lookups or future shadowing files.
 
 ## Inventory
 
@@ -167,22 +160,33 @@ The public form is:
 ```ruby
 facet name,
   inventory: inventory_name,
-  digest: :content | :paths,
+  digest: :content | :existence | :paths | :contents,
   granularity: :file | :set,
   scope: :test | :suite
 ```
 
-Use these two combinations for ordinary custom files:
+Use `content/file` for ordinary custom files. `existence/file` tracks whether a
+declared path exists. `contents/set` provides one coarse checksum for the set's
+paths and contents. `paths/set` is reserved for the single membership facet
+that Testmon adds or normalizes for each inventory. The internal
+`ruby_source/file` facet is reserved for Testmon's Ruby provider.
 
 | Purpose | `digest` | `granularity` | Result |
 | --- | --- | --- | --- |
 | Existing-file edit | `:content` | `:file` | one artifact per file |
-| Add/delete/rename | `:paths` | `:set` | one membership artifact |
+| Existence change | `:existence` | `:file` | one artifact per declared path |
+| Add/delete/rename | `:paths` | `:set` | one suite-scoped membership input |
+| Coarse set content | `:contents` | `:set` | one suite-scoped set input |
 
-`:test` scope requires a claim from a test observation. `:suite` adds a global
-edge and is appropriate only when any change must run the complete suite, such
-as boot configuration. Prefer test-scoped content plus membership when a public
-runtime signal can identify consumers.
+`:test` scope requires a claim from a test observation. `:suite` copies the input
+into every passing test snapshot, so a later change selects every discovered test
+that has learned it. Membership is always normalized to `:suite`, even if a
+provider declares `scope: :test`; a claim alone cannot prove complete observation
+of additions, misses, or lookup shadowing.
+
+The `config.fileset` convenience API is deliberately coarse and always
+suite-scoped. Use a provider with observations and claims for per-test content
+attribution.
 
 ## Claims
 
@@ -194,8 +198,7 @@ claim :yaml_read,
   to: [:yaml, :yaml_content],
   path: :path
 
-claim :yaml_read,
-  to: [:yaml, :yaml_membership]
+# No membership claim is needed; it is suite-scoped automatically.
 ```
 
 For a file-granularity facet, `path` selects the declared artifact. For a
@@ -262,10 +265,11 @@ sealed Ruby inventory; `:script_compiled` adds targets for code loaded later.
 This is also the safety detector for project code running on an unattributed
 thread while a test is active.
 
-Generic C-level `File`/`IO` observations are enabled during `discover`. They
-also remain enabled during a normal run whenever an active provider declares a
-`file_open` or `file_read` claim, so a reexecuted test can relearn that edge.
-They are not enabled merely as unused diagnostics on every normal run. Native
+Generic C-level `File`/`IO` observations are enabled by `run --full`. They also
+remain enabled during a normal run whenever an active
+provider declares a `file_open` or `file_read` claim, so a reexecuted test can
+relearn that edge. They are not enabled merely as unused diagnostics on every
+normal run. Native
 direct reads still do not expose their argument path; use a Ruby wrapper,
 notification, or a tracked `File` instance when an exact path is required.
 
@@ -290,12 +294,6 @@ Minitest::Testmon.configure do |config|
       granularity: :file,
       scope: :test
 
-    facet :template_membership,
-      inventory: :templates,
-      digest: :paths,
-      granularity: :set,
-      scope: :test
-
     observe_notification :document_render,
       "render.document",
       path: ->(notification) { notification.payload["identifier"] },
@@ -306,9 +304,6 @@ Minitest::Testmon.configure do |config|
     claim :document_render,
       to: [:templates, :template_content],
       path: :path
-
-    claim :document_render,
-      to: [:templates, :template_membership]
   end
 end
 ```
@@ -331,8 +326,9 @@ framework's mutable payload object. `details` has the same canonical return
 constraint as a TracePoint details extractor: hashes returned by user code must
 use string keys.
 
-Notification subscribers are installed before test filtering. A subscriber
-startup failure forces a full run; it cannot silently remove dependencies.
+Notification subscribers are installed before Testmon applies its selected-ID
+filter. A subscriber startup failure selects every discovered test and blocks
+publication; it cannot silently remove dependencies.
 
 Rails' built-in providers use this same pattern for Action View events. Do not
 register the example `documents` provider for ordinary Rails views—the
@@ -371,24 +367,27 @@ observers, rebuilds every inventory and facet, resolves observations through
 claims/ignores, and publishes only if the evidence, execution ledger, and
 start/end inventory seal are complete. A content edit, membership change,
 existence change, symlink retarget, or canonical-path change during the run
-retains the prior generation and forces conservative recovery.
+retains the prior revision and leaves selected tests in retry state.
 
-TracePoint also detects project Ruby executing on a thread with no test-local
-ID while another test boundary is active. Such evidence is promoted to a
-suite-scoped dependency with `reason: "promoted_to_suite"`; it is never attached
-to whichever test happens to be active on another thread.
+Testmon propagates a revocable attribution token through `Thread.new`,
+`Thread.start`, and `Thread.fork`, so joined child-thread work is claimed by the
+test that created it. Finishing the test revokes that token; a still-live child
+marks the run incomplete as `thread_leak` and can no longer claim later work.
+Project Ruby executed by a pre-existing pool with no token while a boundary is
+active is `ambiguous_context` and also blocks publication. A true observer
+late-start failure remains `late_activation` and blocks publication.
 
 Provider definitions are part of the configuration snapshot. Duplicate names,
 unknown inventory/facet references, invalid roots, unsupported digest or
 granularity values, unknown artifact keys, observer failures, and unclaimed
 observations are configuration or completeness failures. They result in a
-clear error or conservative full-run behavior, never a narrower guess.
+clear error or selection of every discovered test, never a narrower guess.
 
 Keep extractors and custom selectors deterministic and side-effect free. They
 also run inside Rails process workers, so they must use only the supplied
 immutable wrappers/snapshots and fork-safe application constants. Testmon owns
 worker evidence transport; a provider must not open the testmon SQLite cache.
 
-Use [`minitest-testmon discover`](discovery.md) after adding or changing a
+Use [`minitest-testmon run --full`](discovery.md) after adding or changing a
 provider, then exercise content edits and membership add/delete/rename cases
 before publishing it to CI.

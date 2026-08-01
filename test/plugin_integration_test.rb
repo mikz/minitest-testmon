@@ -62,7 +62,8 @@ class PluginIntegrationTest < TestmonTestCase
         {"BUNDLE_GEMFILE" => nil, "RUBYLIB" => nil, "RUBYOPT" => nil},
         RbConfig.ruby,
         File.join(nested_gem, "exe/minitest-testmon"),
-        "discover",
+        "run",
+        "--full",
         "--",
         RbConfig.ruby,
         "-Itest",
@@ -108,6 +109,19 @@ class PluginIntegrationTest < TestmonTestCase
     assert_equal "true\n", stdout
   end
 
+  def test_rails_parallel_threshold_uses_unfiltered_runnable_methods
+    runnable = Object.new
+    runnable.define_singleton_method(:runnable_methods) { %w[test_one test_two test_three] }
+    executor = Struct.new(:size, :threshold).new(2, 2)
+    runnables = Minitest::Runnable.runnables
+    original = runnables.dup
+
+    runnables.replace([runnable])
+    assert Minitest::Testmon::Runtime.allocate.__send__(:parallel_executor_will_run?, executor)
+  ensure
+    runnables&.replace(original)
+  end
+
   private
 
   def assert_reporter_compatibility(order)
@@ -138,7 +152,7 @@ class PluginIntegrationTest < TestmonTestCase
       RUBY
       write_file(File.join(directory, "run_tests.rb"), runner(order))
 
-      discovery = invoke(directory, marker, :discover)
+      discovery = invoke(directory, marker, full: true)
       assert discovery.fetch(:status).success?,
         "#{order} discovery failed:\n#{discovery.fetch(:stdout)}\n#{discovery.fetch(:stderr)}"
       discovered = read_report(directory)
@@ -147,7 +161,7 @@ class PluginIntegrationTest < TestmonTestCase
       assert_equal ["ValueTest#test_value"], discovered.dig("tests", "executed")
       assert_equal 1, discovered.fetch("generation")
 
-      warm = invoke(directory, marker, :run)
+      warm = invoke(directory, marker)
       assert warm.fetch(:status).success?,
         "#{order} warm run failed:\n#{warm.fetch(:stdout)}\n#{warm.fetch(:stderr)}"
       report = read_report(directory)
@@ -206,12 +220,13 @@ class PluginIntegrationTest < TestmonTestCase
     RUBY
   end
 
-  def invoke(directory, marker, mode)
+  def invoke(directory, marker, full: false)
     stdout, stderr, status = Open3.capture3(
       {
         "EXECUTION_MARKER" => marker,
         "MINITEST_TESTMON" => "1",
-        "MINITEST_TESTMON_MODE" => mode.to_s,
+        # A forced full relearn (the collapsed replacement for `discover`).
+        "MINITEST_TESTMON_FULL" => full ? "1" : nil,
         "MINITEST_TESTMON_DB" => File.join(directory, ".minitest-testmon.sqlite3")
       },
       RbConfig.ruby,

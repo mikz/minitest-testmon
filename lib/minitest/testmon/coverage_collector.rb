@@ -27,8 +27,8 @@ module Minitest
         else
           @snapshots[test_id] = snapshot
         end
-        ExecutionContext.begin_boundary
-        ExecutionContext.set(test_id)
+        token = ExecutionContext.set(test_id)
+        ExecutionContext.begin_boundary(attribution: token)
       end
 
       def finish_test(test_id)
@@ -48,7 +48,8 @@ module Minitest
           end
         end
       ensure
-        ExecutionContext.clear
+        leaked_threads = ExecutionContext.clear
+        @session.incomplete(:thread_leak) unless leaked_threads.empty?
         ExecutionContext.end_boundary
         @mutex.synchronize { @active -= 1 }
       end

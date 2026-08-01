@@ -2,8 +2,17 @@
 
 require_relative "test_helper"
 
-class IseqAdversarialAcceptanceTest < Minitest::Test
+class RubySourceAdversarialAcceptanceTest < Minitest::Test
   include ProductAcceptance
+
+  SUBJECT_CONSUMERS = %w[
+    test_alpha
+    test_beta
+    test_branch_operand
+    test_dispatch_operand
+    test_nested_block_operand
+    test_string_literal
+  ].freeze
 
   def test_string_literal_operand_change_selects_its_consumer
     assert_behavioral_mutation(
@@ -37,7 +46,7 @@ class IseqAdversarialAcceptanceTest < Minitest::Test
     )
   end
 
-  def test_top_level_iseq_uses_explicit_whole_file_fallback
+  def test_top_level_ruby_file_uses_an_exact_byte_checksum
     with_project("selection") do |project|
       baseline = learn_baseline(project)
       target_id = find_test_id(baseline, "SelectionTest#test_top_level_fallback")
@@ -47,15 +56,16 @@ class IseqAdversarialAcceptanceTest < Minitest::Test
       )
 
       result = driver.run(project)
-      refute result.success?, "top-level ISeq mutant unexpectedly passed"
+      refute result.success?, "top-level Ruby source mutant unexpectedly passed"
       report = driver.report(project)
       assert_report_contract report
       assert_equal [target_id], report.dig("tests", "selected")
-      fallback = report.fetch("inventory").values.flat_map { |category| category.fetch("items") }.select do |item|
+      inputs = report.fetch("inventory").values.flat_map { |category| category.fetch("items") }.select do |item|
         item.fetch("path")&.end_with?("lib/top_level_fallback.rb") &&
-          item.fetch("reason") == "whole_file_fallback"
+          item.fetch("facet") == "ruby_source" &&
+          item.fetch("fingerprint").is_a?(String)
       end
-      refute_empty fallback, "top-level executable code was not reported as whole-file fallback"
+      refute_empty inputs, "top-level Ruby input did not expose its exact-byte checksum"
     end
   end
 
@@ -71,13 +81,16 @@ class IseqAdversarialAcceptanceTest < Minitest::Test
       project.write("lib/subject.rb", changed)
 
       result = driver.run(project)
-      refute result.success?, "behavioral ISeq mutant unexpectedly passed"
+      refute result.success?, "behavioral Ruby source mutant unexpectedly passed"
       report = driver.report(project)
       assert_report_contract report
-      assert_equal [target_id], report.dig("tests", "selected")
+      expected = SUBJECT_CONSUMERS.map { |fragment| find_test_id(baseline, fragment) }.sort
+      assert_equal expected, report.dig("tests", "selected")
+      assert_equal expected, report.dig("tests", "executed")
+      assert_includes expected, target_id
 
       stdout, stderr, status = run_selector_disabled(project)
-      refute status.success?, "selector-disabled oracle did not expose ISeq mutant"
+      refute status.success?, "selector-disabled oracle did not expose Ruby source mutant"
       assert_includes "#{stdout}\n#{stderr}", test_fragment.split("#").last
     end
   end

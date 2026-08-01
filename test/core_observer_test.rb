@@ -28,7 +28,7 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
-  def test_project_execution_on_an_unattributed_thread_during_a_test_is_suite_scoped
+  def test_project_execution_without_a_propagated_token_during_a_test_is_ambiguous
     with_project do |project|
       script = write_file(File.join(project, "background.rb"), "BACKGROUND_VALUE = 1\n")
       session = RecordingSession.new
@@ -45,9 +45,9 @@ class CoreObserverTest < TestmonTestCase
 
       ambiguous = session.observations.find { |item| item.operation == :unattributed_thread }
       refute_nil ambiguous
-      assert_equal :late_activation, ambiguous.reason
+      assert_equal :ambiguous_context, ambiguous.reason
       assert_equal :suite, ambiguous.scope
-      assert_empty session.diagnostics
+      assert_equal ["ambiguous_context"], session.diagnostics
     end
   end
 
@@ -199,7 +199,7 @@ class CoreObserverTest < TestmonTestCase
       RUBY
       snapshot = ruby_snapshot(project)
       source_artifacts = snapshot.context.artifacts.select do |artifact|
-        artifact.relative_path == "lib/unhookable.rb" && artifact.facet == "ruby_iseq"
+        artifact.relative_path == "lib/unhookable.rb" && artifact.facet == "ruby_source"
       end
 
       refute_empty source_artifacts
@@ -214,7 +214,7 @@ class CoreObserverTest < TestmonTestCase
         capability.fetch(:unhookable).fetch(0).fetch(:trace_points)
       )
 
-      session = snapshot.observe(mode: :discover)
+      session = snapshot.observe
       observer = Minitest::Testmon::CoreObserver.new(
         session,
         resolver: snapshot.context.resolver,
@@ -247,7 +247,7 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
-  def test_sealed_ruby_inventory_targets_preloaded_config_code_on_a_background_thread
+  def test_sealed_ruby_inventory_attributes_a_joined_child_to_its_test
     with_project do |project|
       script = write_file(File.join(project, "config", "ci.rb"), <<~RUBY)
         module TestmonConfigCiTarget
@@ -264,7 +264,7 @@ class CoreObserverTest < TestmonTestCase
       assert_includes snapshot.ruby_inventory_paths, File.realpath(script)
       assert_includes snapshot.ruby_inventory_roots, :project
 
-      session = snapshot.observe(mode: :discover)
+      session = snapshot.observe
       observer = Minitest::Testmon::CoreObserver.new(
         session,
         resolver: snapshot.context.resolver,
@@ -276,34 +276,81 @@ class CoreObserverTest < TestmonTestCase
       ).start
       session.attach_observer(observer)
 
+      Minitest::Testmon::ThreadContextPropagation.install!
+      test_id = "ConfigTest#test_background"
+      Minitest::Testmon::ExecutionContext.set(test_id)
       Minitest::Testmon::ExecutionContext.begin_boundary
       Thread.new { TestmonConfigCiTarget.call }.join
+      Minitest::Testmon::ExecutionContext.clear
       Minitest::Testmon::ExecutionContext.end_boundary
       report = session.finalize
 
       observation = report.observations.find do |item|
-        item.operation == :unattributed_thread && item.path == File.realpath(script)
+        item.operation == :tracepoint_call && item.path == File.realpath(script)
       end
       refute_nil observation
-      assert_equal :late_activation, observation.reason
+      assert_equal test_id, observation.test_id
       claimed_keys = report.dependencies.filter_map do |dependency|
-        dependency.artifact_key if dependency.test_id == "*"
+        dependency.artifact_key if dependency.test_id == test_id
       end
       config_keys = report.artifacts.filter_map do |artifact|
         artifact.key if artifact.relative_path == "config/ci.rb"
       end
       claimed_config_keys = claimed_keys & config_keys
       refute_empty claimed_config_keys
-      suite_keys = report.to_h.dig(:inventory, :suite_scoped, :items).map { |item| item.fetch(:key) }
-      verified_empty_keys = report.to_h.dig(:inventory, :verified_empty, :items).map { |item| item.fetch(:key) }
-      claimed_config_keys.each do |key|
-        assert_includes suite_keys, key
-        refute_includes verified_empty_keys, key
-      end
       assert report.complete?
+      assert_empty report.diagnostics
     ensure
       Minitest::Testmon::ExecutionContext.reset_boundaries!
       Object.send(:remove_const, :TestmonConfigCiTarget) if Object.const_defined?(:TestmonConfigCiTarget, false)
+    end
+  end
+
+  def test_preexisting_thread_execution_during_a_boundary_fails_closed
+    with_project do |project|
+      script = write_file(File.join(project, "preexisting.rb"), <<~RUBY)
+        module TestmonPreexistingTarget
+          def self.call = :called
+        end
+      RUBY
+      load script
+      snapshot = ruby_snapshot(project)
+      session = snapshot.observe
+      observer = Minitest::Testmon::CoreObserver.new(
+        session,
+        resolver: snapshot.context.resolver,
+        allowed_roots: snapshot.ruby_inventory_roots,
+        ruby_paths: snapshot.ruby_inventory_paths,
+        test_only: true,
+        observe_files: false,
+        boundary_tracker: Minitest::Testmon::ExecutionContext
+      ).start
+      session.attach_observer(observer)
+      ready = Queue.new
+      release = Queue.new
+      worker = Thread.new do
+        ready << true
+        release.pop
+        TestmonPreexistingTarget.call
+      end
+      ready.pop
+
+      test_id = "ConfigTest#test_preexisting"
+      Minitest::Testmon::ExecutionContext.set(test_id)
+      Minitest::Testmon::ExecutionContext.begin_boundary
+      release << true
+      worker.join
+      Minitest::Testmon::ExecutionContext.clear
+      Minitest::Testmon::ExecutionContext.end_boundary
+      report = session.finalize
+
+      refute report.complete?
+      assert_includes report.diagnostics, "ambiguous_context"
+      assert report.observations.any? { |item| item.reason == :ambiguous_context }
+    ensure
+      Minitest::Testmon::ExecutionContext.reset_boundaries!
+      Minitest::Testmon::ExecutionContext.clear
+      Object.send(:remove_const, :TestmonPreexistingTarget) if Object.const_defined?(:TestmonPreexistingTarget, false)
     end
   end
 

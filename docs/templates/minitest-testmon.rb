@@ -18,18 +18,18 @@ Minitest::Testmon.configure do |config|
   # config.ruby_files "lib/**/*.rb", root: :shared
 
   # A coarse built-in fileset is useful when runtime attribution is impossible.
-  # Prefer a provider when the input can be assigned to individual tests.
+  # Every inventory, including a fileset, has suite-scoped path membership.
+  # Prefer a provider when existing-file content can be assigned to tests.
   # config.fileset :generated_contracts,
   #   root: :project,
   #   include: ["config/contracts/**/*.json"],
   #   exclude: ["config/contracts/generated/**/*"],
-  #   mode: :contents,
-  #   scope: :suite
+  #   mode: :contents
 
   # Custom providers are versioned configuration. See docs/providers.md.
   # config.provider :application_settings, version: 1 do
   # end
 
-  # Rails 8.1 providers are automatic. Uncomment to disable all five.
+  # Rails 8.1 providers are automatic. Uncomment to disable the bundle.
   # config.disable_bundle :rails_8_1
 end

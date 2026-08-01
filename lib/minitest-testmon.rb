@@ -8,6 +8,9 @@ testmon_request = Minitest::Testmon::Environment.enabled? ||
 if defined?(Rails::Railtie)
   if testmon_request
     require_relative "minitest/testmon/rails_bootstrap"
+    if defined?(Rails::VERSION)
+      Minitest::Testmon::RailsBootstrap.preload(ARGV, application_root: Dir.pwd)
+    end
 
     module Minitest
       module Testmon
@@ -26,6 +29,13 @@ if defined?(Rails::Railtie)
               test_command: test_command,
               rake_test_prepare: rake_test_prepare
             )
+          end
+
+          initializer "minitest_testmon.request_attribution" do |app|
+            if ENV[RailsBootstrap::COMMAND_ENV]
+              require "minitest/testmon/request_attribution"
+              app.middleware.unshift(Minitest::Testmon::RequestAttribution)
+            end
           end
         end
       end

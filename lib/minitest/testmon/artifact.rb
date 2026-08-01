@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "input"
+
 module Minitest
   module Testmon
     Artifact = Data.define(:key, :provider, :root, :relative_path, :facet, :fingerprint, :members, :scope, :test_ids, :reason) do
@@ -19,6 +21,19 @@ module Minitest
           fingerprint: fingerprint&.digest,
           reason: (reason || fingerprint&.reason)&.to_s
         }
+      end
+
+      def to_input
+        Input.new(
+          key: key,
+          provider: provider,
+          facet: facet,
+          root: root,
+          relative_path: relative_path,
+          fingerprint: fingerprint,
+          members: members,
+          scope: scope
+        )
       end
     end
 

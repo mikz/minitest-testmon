@@ -35,12 +35,9 @@ module MinitestTestmonAcceptance
       end
     end
 
-    def discover(project, command: project.test_command, env: {})
-      invoke(project, "discover", "--", *command, env: env)
-    end
-
-    def run(project, command: project.test_command, env: {})
-      invoke(project, "run", "--", *command, env: env)
+    def run(project, command: project.test_command, env: {}, full: false)
+      flags = full ? ["--full"] : []
+      invoke(project, "run", *flags, "--", *command, env: env)
     end
 
     def explain(project, test_id, env: {})

@@ -1,839 +1,280 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "minitest/testmon/input"
+require "minitest/testmon/test_snapshot"
+require "minitest/testmon/selection"
+require "minitest/testmon/run_evidence"
 
 class StoreTest < TestmonTestCase
-  class MaterializationCountingReport < Minitest::Testmon::DiscoveryReport
-    class << self
-      attr_accessor :materializations
+  Report = Data.define(:generation, :context_signature, :mode, :tests, :publication) do
+    def self.build(discovered:, selected:, executed:)
+      new(
+        generation: nil,
+        context_signature: "context",
+        mode: "run",
+        tests: {discovered: discovered.sort, selected: selected.sort, executed: executed.sort}.freeze,
+        publication: {published: false, reason: "not_published"}.freeze
+      )
     end
+
+    def executed_tests = tests.fetch(:executed)
+    def published(value, reason: nil) = with(generation: value, publication: {published: true, reason: reason}.freeze)
+    def with_generation(value) = with(generation: value)
+    def unpublished(reason) = with(publication: {published: false, reason: reason}.freeze)
 
     def to_h
-      self.class.materializations += 1
-      super
+      {
+        schema_version: 2,
+        mode: mode,
+        ready: publication[:published],
+        generation: generation,
+        context_signature: context_signature,
+        bundles: [],
+        tests: tests,
+        observations: {},
+        inventory: {},
+        suggestions: [],
+        publication: publication
+      }
     end
   end
 
-  def test_keeps_immutable_graph_generations_and_run_receipts
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      first = artifact_for("one")
-      first_run = SecureRandom.uuid
-      store.begin_run(run_id: first_run, mode: :run, context_signature: "context")
-      store.acquire_lease!(run_id: first_run)
-      store.publish(
-        report_for(first),
-        outcomes: {"ExampleTest#test_value" => :passed},
-        run_id: first_run
-      )
+  def test_start_execution_durably_marks_exact_selected_tests_running
+    with_store do |store|
+      selection = selection_for(%w[OneTest#test_one TwoTest#test_two], ["TwoTest#test_two"], store.revision)
+      store.acquire_lease!(run_id: "run-1")
+      store.start_execution(run_id: "run-1", selection: selection)
 
-      second = artifact_for("two")
-      second_run = SecureRandom.uuid
-      store.begin_run(run_id: second_run, mode: :run, context_signature: "context")
-      store.acquire_lease!(run_id: second_run)
-      store.publish(
-        report_for(second),
-        outcomes: {"ExampleTest#test_value" => :passed},
-        run_id: second_run
-      )
-
-      assert_equal "one", store.explain("example.rb", generation: 1).first.fetch(:fingerprint)
-      assert_equal "two", store.explain("example.rb", generation: 2).first.fetch(:fingerprint)
-      assert_equal 1, store.report(first_run).fetch("generation")
-      assert_equal 2, store.report(second_run).fetch("generation")
-      assert_equal [second_run, first_run], store.runs(limit: 2).map { |run| run.fetch("id") }
-      store.close
+      assert_equal({"TwoTest#test_two" => :running}, outcomes(store.retries_for(selection.discovered)))
+      assert_empty store.snapshots_for(selection.discovered)
     end
   end
 
-  def test_keeps_only_the_configured_number_of_latest_run_reports
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(
-        File.join(project, "state.sqlite3"),
-        retained_reports: 3
+  def test_success_replaces_only_passing_selected_snapshots_with_literal_inputs
+    with_store do |store|
+      discovered = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(discovered, discovered, store.revision)
+      snapshots = {
+        "OneTest#test_one" => snapshot("OneTest#test_one", input("one", "v1"), "run-1"),
+        "TwoTest#test_two" => snapshot("TwoTest#test_two", input("two", "v1"), "run-1")
+      }
+      report = Report.build(discovered: discovered, selected: discovered, executed: discovered)
+
+      store.acquire_lease!(run_id: "run-1")
+      store.start_execution(run_id: "run-1", selection: selection)
+      published = store.publish(evidence("run-1", selection, report, snapshots:, outcomes: discovered.to_h { |id| [id, :passed] }))
+
+      assert_equal 1, store.revision
+      assert_equal true, published.publication.fetch(:published)
+      assert_empty store.retries_for(discovered)
+      persisted = store.snapshots_for(discovered)
+      assert_equal %w[one two], persisted.values.flat_map { |item| item.inputs.map(&:key) }.sort
+      assert_equal %w[v1 v1], persisted.values.flat_map { |item| item.inputs.map { |value| value.fingerprint.digest } }.sort
+    end
+  end
+
+  def test_round_trips_literal_suite_claimed_and_definition_inputs_for_one_test
+    with_store do |store|
+      test_id = "ExampleTest#test_value"
+      values = [input("$context", "context"), input("view", "view"), input("test-file", "definition")]
+      selection = selection_for([test_id], [test_id], store.revision)
+      report = Report.build(discovered: [test_id], selected: [test_id], executed: [test_id])
+      stored = Minitest::Testmon::TestSnapshot.new(
+        test_id: test_id, inputs: values, recorded_at: "2026-08-01T00:00:00Z", run_id: "run-1"
       )
-      run_ids = 5.times.map do |index|
-        run_id = "run-#{index}"
-        store.begin_run(run_id:, mode: :run, context_signature: "context")
-        store.record_report(run_id, report_for(artifact_for(index.to_s)))
-        run_id
+
+      store.acquire_lease!(run_id: "run-1")
+      store.start_execution(run_id: "run-1", selection: selection)
+      store.publish(evidence("run-1", selection, report, snapshots: {test_id => stored}, outcomes: {test_id => :passed}))
+
+      restored = store.snapshots_for([test_id]).fetch(test_id)
+      assert_equal %w[$context test-file view], restored.inputs.map(&:key).sort
+      assert_equal %w[context definition view], restored.inputs.map { |item| item.fingerprint.digest }.sort
+    end
+  end
+
+  def test_incomplete_source_drift_and_invalid_ledger_reject_publication
+    cases = [
+      [{complete: false}, "provider_incomplete"],
+      [{source_stable: false}, "source_drift"],
+      [{executed: []}, "provider_incomplete"]
+    ]
+    cases.each_with_index do |(override, expected_reason), index|
+      with_store do |store|
+        test_id = "ExampleTest#test_value"
+        selection = selection_for([test_id], [test_id], store.revision)
+        executed = override.fetch(:executed, [test_id])
+        report = Report.build(discovered: [test_id], selected: [test_id], executed: executed)
+        snapshot_value = snapshot(test_id, input("source", "v1"), "run-#{index}")
+        store.acquire_lease!(run_id: "run-#{index}")
+        store.start_execution(run_id: "run-#{index}", selection: selection)
+        result = store.publish(evidence(
+          "run-#{index}", selection, report,
+          snapshots: {test_id => snapshot_value}, outcomes: {test_id => :passed}, **override.slice(:complete, :source_stable)
+        ))
+
+        assert_equal false, result.publication.fetch(:published)
+        assert_equal expected_reason, result.publication.fetch(:reason)
+        assert_empty store.snapshots_for([test_id])
       end
-
-      assert_equal run_ids.last(3).reverse, store.runs(limit: 10).map { |run| run.fetch("id") }
-      assert_nil store.report(run_ids.first)
-      refute_nil store.report(run_ids.last)
-      store.close
     end
   end
 
-  def test_bounds_pending_reports_without_pruning_the_active_leased_run
+  def test_stale_revision_is_rejected_before_publication
+    with_store do |store|
+      selection = selection_for(["ExampleTest#test_value"], [], 99)
+      store.acquire_lease!(run_id: "stale")
+      assert_raises(Minitest::Testmon::PhaseError) do
+        store.start_execution(run_id: "stale", selection: selection)
+      end
+    end
+  end
+
+  def test_zero_selection_writes_a_published_receipt_without_advancing_revision
+    with_store do |store|
+      selection = selection_for(["ExampleTest#test_value"], [], store.revision)
+      report = Report.build(discovered: selection.discovered, selected: [], executed: [])
+      store.acquire_lease!(run_id: "warm")
+      store.start_execution(run_id: "warm", selection: selection)
+      published = store.publish(evidence("warm", selection, report, snapshots: {}, outcomes: {}))
+
+      assert_equal true, published.publication.fetch(:published)
+      assert_nil store.revision
+      assert_equal [], store.report("warm").dig("tests", "selected")
+    end
+  end
+
+  def test_any_test_failure_preserves_every_previous_snapshot_atomically
+    with_store do |store|
+      seed(store, {"OneTest#test_one" => input("one", "v1"), "TwoTest#test_two" => input("two", "v1")})
+      discovered = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(discovered, discovered, store.revision)
+      replacements = {
+        "OneTest#test_one" => snapshot("OneTest#test_one", input("one", "v2"), "run-2")
+      }
+      report = Report.build(discovered: discovered, selected: discovered, executed: discovered)
+
+      store.acquire_lease!(run_id: "run-2")
+      store.start_execution(run_id: "run-2", selection: selection)
+      rejected = store.publish(evidence(
+        "run-2", selection, report,
+        snapshots: replacements,
+        outcomes: {"OneTest#test_one" => :passed, "TwoTest#test_two" => :failed}
+      ))
+
+      assert_equal false, rejected.publication.fetch(:published)
+      assert_equal "test_failure", rejected.publication.fetch(:reason)
+      assert_equal 1, store.revision
+      persisted = store.snapshots_for(discovered)
+      assert_equal "v1", persisted.fetch("OneTest#test_one").inputs.first.fingerprint.digest
+      assert_equal "v1", persisted.fetch("TwoTest#test_two").inputs.first.fingerprint.digest
+      assert_equal({"OneTest#test_one" => :running, "TwoTest#test_two" => :failed}, outcomes(store.retries_for(discovered)))
+    end
+  end
+
+  def test_successful_subset_does_not_write_an_omitted_test
+    with_store do |store|
+      seed(store, {"OneTest#test_one" => input("one", "v1"), "TwoTest#test_two" => input("two", "v1")})
+      discovered = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(discovered, ["OneTest#test_one"], store.revision)
+      replacement = snapshot("OneTest#test_one", input("one", "v2"), "run-2")
+      report = Report.build(discovered: discovered, selected: selection.selected, executed: selection.selected)
+
+      store.acquire_lease!(run_id: "run-2")
+      store.start_execution(run_id: "run-2", selection: selection)
+      store.publish(evidence(
+        "run-2", selection, report,
+        snapshots: {replacement.test_id => replacement},
+        outcomes: {replacement.test_id => :passed}
+      ))
+
+      persisted = store.snapshots_for(discovered)
+      assert_equal "v2", persisted.fetch("OneTest#test_one").inputs.first.fingerprint.digest
+      assert_equal "v1", persisted.fetch("TwoTest#test_two").inputs.first.fingerprint.digest
+    end
+  end
+
+  def test_schema_mismatch_is_quarantined_as_incompatible
     with_project do |project|
       path = File.join(project, "state.sqlite3")
-      active = Minitest::Testmon::Store.new(path, retained_reports: 2)
-      active_run_id = "active-run"
-      active.begin_run(run_id: active_run_id, mode: :run, context_signature: "context")
-      active.acquire_lease!(run_id: active_run_id)
+      database = SQLite3::Database.new(path)
+      database.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+      database.execute("INSERT INTO metadata(key, value) VALUES ('schema_version', '1')")
+      database.close
 
-      writer = Minitest::Testmon::Store.new(path, retained_reports: 2)
-      3.times do |index|
-        writer.begin_run(run_id: "pending-#{index}", mode: :run, context_signature: "context")
-      end
-
-      retained_while_active = writer.runs(limit: 10)
-      assert_equal 3, retained_while_active.length
-      assert_includes retained_while_active.map { |run| run.fetch("id") }, active_run_id
-      assert retained_while_active.all? { |run| run.fetch("state") == "pending" }
-
-      active.release_lease!
-      writer.begin_run(run_id: "pending-3", mode: :run, context_signature: "context")
-
-      assert_equal %w[pending-3 pending-2], writer.runs(limit: 10).map { |run| run.fetch("id") }
-      writer.close
-      active.close
-    end
-  end
-
-  def test_publish_select_explain_and_failure_rollback
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
       store = Minitest::Testmon::Store.new(path)
-      artifact = artifact_for("one")
-      assert store.select([artifact], context_signature: "context").full?
-
-      store.acquire_lease!
-      published = store.publish(report_for(artifact), outcomes: {"ExampleTest#test_value" => :passed})
-      assert published.ready?
-      assert_equal 1, store.generation
-      assert store.select([artifact], context_signature: "context").none?
-
-      changed = artifact_for("two")
-      selection = store.select([changed], context_signature: "context")
-      assert_equal :subset, selection.mode
-      assert_equal ["ExampleTest#test_value"], selection.tests
-      assert_equal "ExampleTest#test_value", store.explain("example.rb").first[:test_id]
-
-      store.acquire_lease!
-      rejected = store.publish(report_for(changed), outcomes: {"ExampleTest#test_value" => :failed})
-      refute rejected.ready?
-      assert_equal "test_failure", rejected.publication[:reason]
-      assert_equal 1, rejected.generation
-      assert_equal 1, store.generation
-      assert_equal :subset, store.select([changed], context_signature: "context").mode
+      assert_nil store.revision
       store.close
-    end
-  end
-
-  def test_exclusive_lease_fails_fast
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
-      first = Minitest::Testmon::Store.new(path)
-      second = Minitest::Testmon::Store.new(path)
-      first.acquire_lease!
-
-      error = assert_raises(Minitest::Testmon::LeaseUnavailable) { second.acquire_lease! }
-      assert_equal "cache_lease_unavailable", error.message
-      first.release_lease!
-      first.close
-      second.close
-    end
-  end
-
-  def test_corrupt_cache_is_quarantined_before_rebuild
-    with_project do |project|
-      path = write_file(File.join(project, "state.sqlite3"), "not sqlite")
-      store = Minitest::Testmon::Store.new(path)
-
-      assert_equal "cache_corrupt_rebuilt", store.recovery_reason
-      assert_equal 1, Dir["#{path}.corrupt-*"].length
-      assert store.select([], context_signature: "context").full?
-      store.close
-    end
-  end
-
-  def test_busy_database_is_not_quarantined
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
-      Minitest::Testmon::Store.new(path).close
-      owner = SQLite3::Database.new(path)
-      owner.busy_timeout = 0
-      owner.execute("BEGIN EXCLUSIVE")
-
-      error = assert_raises(Minitest::Testmon::LeaseUnavailable) do
-        Minitest::Testmon::Store.new(path)
-      end
-      assert_equal "cache_lease_unavailable", error.message
-      assert_empty Dir["#{path}.corrupt-*"]
-    ensure
-      begin
-        owner&.execute("ROLLBACK")
-      rescue
-        nil
-      end
-      begin
-        owner&.close
-      rescue
-        nil
-      end
-    end
-  end
-
-  def test_membership_artifact_selects_consumers_for_covered_file_addition
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
-      original = artifact_for("one")
-      membership = membership_artifact("members-v1", ["project:lib/example.rb"])
-      store = Minitest::Testmon::Store.new(path)
-      store.acquire_lease!
-      store.publish(
-        report_for_membership([original, membership], membership),
-        outcomes: {"ExampleTest#test_value" => :passed}
-      )
-
-      added = Minitest::Testmon::Artifact.new(
-        key: "added", provider: :core, root: :project, relative_path: "lib/added.rb",
-        facet: "content", fingerprint: Minitest::Testmon::Fingerprint.known("added"),
-        members: [], scope: :test, test_ids: [], reason: nil
-      )
-      changed_membership = membership_artifact(
-        "members-v2",
-        ["project:lib/example.rb", "project:lib/added.rb"]
-      )
-      selection = store.select([original, added, changed_membership], context_signature: "context")
-      assert_equal :subset, selection.mode
-      assert_equal ["ExampleTest#test_value"], selection.tests
-      store.close
-    end
-  end
-
-  def test_dead_lease_owner_forces_full_recovery_and_discards_only_its_spools
-    skip "fork is required" unless Process.respond_to?(:fork)
-    owner = nil
-    reader = nil
-
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
-      artifact = artifact_for("one")
-      baseline = Minitest::Testmon::Store.new(path)
-      baseline.acquire_lease!
-      baseline.publish(report_for(artifact), outcomes: {"ExampleTest#test_value" => :passed})
-      baseline.close
-
-      stale_run_id = "11111111-1111-4111-8111-111111111111"
-      other_run_id = "22222222-2222-4222-8222-222222222222"
-      spool_root = File.join(project, "tmp/minitest-testmon/workers")
-      stale_directory = File.join(spool_root, stale_run_id)
-      other_directory = File.join(spool_root, other_run_id)
-      FileUtils.mkdir_p([stale_directory, other_directory])
-      write_file(File.join(stale_directory, "000-dead.jsonl.tmp"), "partial\n")
-      write_file(File.join(other_directory, "000-live.jsonl.tmp"), "unrelated\n")
-
-      reader, writer = IO.pipe
-      owner = fork do
-        reader.close
-        store = Minitest::Testmon::Store.new(path)
-        store.acquire_lease!(run_id: stale_run_id)
-        writer.write("ready")
-        writer.close
-        sleep
-      end
-      writer.close
-      assert_equal "ready", reader.read(5)
-      Process.kill("KILL", owner)
-      Process.wait(owner)
-
-      recovered = Minitest::Testmon::Store.new(path)
-      recovered.acquire_lease!(run_id: "33333333-3333-4333-8333-333333333333")
-      assert_equal "worker_incomplete", recovered.recovery_reason
-      assert_equal stale_run_id, recovered.recovered_run_id
-      selection = recovered.select([artifact], context_signature: "context")
-      assert selection.full?
-      assert_equal ["worker_incomplete"], selection.reasons
-
-      assert Minitest::Testmon::WorkerSpool.discard_incomplete_run(
-        project_root: project,
-        run_id: recovered.recovered_run_id
-      )
-      refute File.exist?(stale_directory)
-      assert File.directory?(other_directory)
-      recovered.release_lease!
-      recovered.close
-
-      retry_store = Minitest::Testmon::Store.new(path)
-      assert_equal "worker_incomplete", retry_store.recovery_reason
-      retry_store.acquire_lease!(run_id: "44444444-4444-4444-8444-444444444444")
-      assert retry_store.select([artifact], context_signature: "context").full?
-      retry_store.publish(report_for(artifact), outcomes: {"ExampleTest#test_value" => :passed})
-      retry_store.close
-
-      verified = Minitest::Testmon::Store.new(path)
-      assert_nil verified.recovery_reason
-      assert verified.select([artifact], context_signature: "context").none?
-      verified.close
-    ensure
-      reader&.close unless reader&.closed?
-      if owner
-        begin
-          Process.kill("KILL", owner)
-        rescue
-          nil
-        end
-        begin
-          Process.wait(owner)
-        rescue
-          nil
-        end
-      end
-    end
-  end
-
-  def test_skipped_test_preserves_edges_and_forces_full_recovery
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      original = artifact_for("one")
-      store.acquire_lease!
-      store.publish(report_for(original), outcomes: {"ExampleTest#test_value" => :passed})
-
-      changed = artifact_for("two")
-      store.acquire_lease!
-      rejected = store.publish(report_for(changed), outcomes: {"ExampleTest#test_value" => :skipped})
-
-      assert_equal "test_skip", rejected.publication[:reason]
-      assert_equal 1, rejected.generation
-      assert_equal "ExampleTest#test_value", store.explain("example.rb").first.fetch(:test_id)
-      selection = store.select([changed], context_signature: "context")
-      assert selection.full?
-      assert_equal ["test_skip"], selection.reasons
-
-      recovery = custom_report(
-        artifacts: [changed],
-        discovered: ["ExampleTest#test_value"],
-        selected: ["ExampleTest#test_value"],
-        executed: ["ExampleTest#test_value"],
-        dependencies: [["ExampleTest#test_value", changed]],
-        selection_mode: :full
-      )
-      store.acquire_lease!
-      recovered = store.publish(
-        recovery,
-        outcomes: {"ExampleTest#test_value" => :skipped}
-      )
-
-      assert recovered.ready?
-      assert_equal 2, recovered.generation
-      assert_nil store.explain("example.rb").first.fetch(:test_id)
-      selection = store.select([changed], context_signature: "context")
-      assert_equal :subset, selection.mode
-      assert_equal ["ExampleTest#test_value"], selection.tests
-      assert_equal ["skipped_test"], selection.reasons
-      store.close
-    end
-  end
-
-  def test_new_permanent_skips_publish_without_edges_and_certify_in_place_regardless_of_outcome_order
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      passed = named_artifact("passed", "lib/passed.rb", "passed-v1")
-      skipped_alpha = named_artifact("skipped-alpha", "lib/skipped_alpha.rb", "skipped-alpha-v1")
-      skipped_zulu = named_artifact("skipped-zulu", "lib/skipped_zulu.rb", "skipped-zulu-v1")
-      skipped_tests = %w[SkippedAlphaTest#test_skipped SkippedZuluTest#test_skipped]
-      discovered = ["PassedTest#test_passed", *skipped_tests]
-      baseline = custom_report(
-        artifacts: [passed, skipped_alpha, skipped_zulu],
-        discovered: discovered,
-        selected: discovered,
-        executed: discovered,
-        dependencies: [
-          ["PassedTest#test_passed", passed],
-          ["SkippedAlphaTest#test_skipped", skipped_alpha],
-          ["SkippedZuluTest#test_skipped", skipped_zulu]
-        ],
-        selection_mode: :full
-      )
-
-      store.acquire_lease!
-      published = store.publish(
-        baseline,
-        outcomes: {
-          "PassedTest#test_passed" => :passed,
-          "SkippedAlphaTest#test_skipped" => :skipped,
-          "SkippedZuluTest#test_skipped" => :skipped
-        }
-      )
-
-      assert published.ready?
-      assert_equal 1, published.generation
-      published_inventory = store.published_inventory
-      passed_edges = store.explain("passed.rb")
-      assert_equal "PassedTest#test_passed", passed_edges.first.fetch(:test_id)
-      assert_nil store.explain("skipped_alpha.rb").first.fetch(:test_id)
-      assert_nil store.explain("skipped_zulu.rb").first.fetch(:test_id)
-      selection = store.select([passed, skipped_alpha, skipped_zulu], context_signature: "context")
-      assert_equal :subset, selection.mode
-      assert_equal skipped_tests, selection.tests
-      assert_equal ["skipped_test"], selection.reasons
-
-      retry_report = custom_report(
-        artifacts: [passed, skipped_alpha, skipped_zulu],
-        discovered: discovered,
-        selected: skipped_tests,
-        executed: skipped_tests,
-        dependencies: [
-          ["SkippedAlphaTest#test_skipped", skipped_alpha],
-          ["SkippedZuluTest#test_skipped", skipped_zulu]
-        ],
-        selection_mode: :subset
-      )
-      store.acquire_lease!
-      certified = store.publish(
-        retry_report,
-        outcomes: {
-          "SkippedZuluTest#test_skipped" => :skipped,
-          "SkippedAlphaTest#test_skipped" => :skipped
-        }
-      )
-
-      assert certified.ready?
-      assert_equal 1, certified.generation
-      assert_equal 1, store.generation
-      assert_equal published_inventory, store.published_inventory
-      assert_equal passed_edges, store.explain("passed.rb")
-      assert_nil store.explain("skipped_alpha.rb").first.fetch(:test_id)
-      assert_nil store.explain("skipped_zulu.rb").first.fetch(:test_id)
-      assert_equal skipped_tests,
-        store.select([passed, skipped_alpha, skipped_zulu], context_signature: "context").tests
-      store.close
-    end
-  end
-
-  def test_known_permanent_skip_can_coexist_with_changed_passing_test_publication
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      passed = named_artifact("passed", "lib/passed.rb", "passed-v1")
-      skipped = named_artifact("skipped", "lib/skipped.rb", "skipped-v1")
-      discovered = %w[PassedTest#test_passed SkippedTest#test_skipped]
-      baseline = custom_report(
-        artifacts: [passed, skipped],
-        discovered: discovered,
-        selected: discovered,
-        executed: discovered,
-        dependencies: [
-          ["PassedTest#test_passed", passed],
-          ["SkippedTest#test_skipped", skipped]
-        ],
-        selection_mode: :full
-      )
-      store.acquire_lease!
-      store.publish(
-        baseline,
-        outcomes: {
-          "PassedTest#test_passed" => :passed,
-          "SkippedTest#test_skipped" => :skipped
-        }
-      )
-
-      changed = named_artifact("passed", "lib/passed.rb", "passed-v2")
-      selection = store.select([changed, skipped], context_signature: "context")
-      assert_equal :subset, selection.mode
-      assert_equal discovered, selection.tests
-
-      changed_report = custom_report(
-        artifacts: [changed, skipped],
-        discovered: discovered,
-        selected: discovered,
-        executed: discovered,
-        dependencies: [
-          ["PassedTest#test_passed", changed],
-          ["SkippedTest#test_skipped", skipped]
-        ],
-        selection_mode: :subset
-      )
-      store.acquire_lease!
-      published = store.publish(
-        changed_report,
-        outcomes: {
-          "PassedTest#test_passed" => :passed,
-          "SkippedTest#test_skipped" => :skipped
-        }
-      )
-
-      assert published.ready?
-      assert_equal 2, published.generation
-      assert_equal "PassedTest#test_passed", store.explain("passed.rb").first.fetch(:test_id)
-      assert_nil store.explain("skipped.rb").first.fetch(:test_id)
-      next_selection = store.select([changed, skipped], context_signature: "context")
-      assert_equal :subset, next_selection.mode
-      assert_equal ["SkippedTest#test_skipped"], next_selection.tests
-      assert_equal ["skipped_test"], next_selection.reasons
-      store.close
-    end
-  end
-
-  def test_removed_artifact_is_deleted_after_its_consumer_executes
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      original = artifact_for("one")
-      membership = membership_artifact("members-v1", ["project:lib/example.rb"])
-      store.acquire_lease!
-      store.publish(
-        report_for_membership([original, membership], membership),
-        outcomes: {"ExampleTest#test_value" => :passed}
-      )
-
-      empty_membership = membership_artifact("members-v2", [])
-      store.acquire_lease!
-      published = store.publish(
-        report_for_membership([empty_membership], empty_membership),
-        outcomes: {"ExampleTest#test_value" => :passed}
-      )
-
-      assert published.ready?
-      assert store.select([empty_membership], context_signature: "context").none?
-      assert_empty store.explain("example.rb")
-      store.close
-    end
-  end
-
-  def test_obsolete_artifact_with_an_unexecuted_consumer_rejects_promotion
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      first = named_artifact("first", "data/first.txt", "one")
-      second = named_artifact("second", "data/second.txt", "two")
-      baseline = custom_report(
-        artifacts: [first, second],
-        discovered: %w[OneTest#test_one TwoTest#test_two],
-        selected: %w[OneTest#test_one TwoTest#test_two],
-        executed: %w[OneTest#test_one TwoTest#test_two],
-        dependencies: [["OneTest#test_one", first], ["TwoTest#test_two", second]],
-        selection_mode: :full
-      )
-      store.acquire_lease!
-      store.publish(baseline, outcomes: {"OneTest#test_one" => :passed, "TwoTest#test_two" => :passed})
-
-      subset = custom_report(
-        artifacts: [first],
-        discovered: %w[OneTest#test_one TwoTest#test_two],
-        selected: ["OneTest#test_one"],
-        executed: ["OneTest#test_one"],
-        dependencies: [["OneTest#test_one", first]],
-        selection_mode: :subset
-      )
-      store.acquire_lease!
-      rejected = store.publish(subset, outcomes: {"OneTest#test_one" => :passed})
-
-      refute rejected.ready?
-      assert_equal "provider_incomplete", rejected.publication[:reason]
-      assert_equal 1, rejected.generation
-      assert_equal 2, store.explain([]).length
-      store.close
-    end
-  end
-
-  def test_full_discovery_prunes_an_absent_failed_test_and_its_artifact
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      kept = named_artifact("kept", "data/kept.txt", "one")
-      removed = named_artifact("removed", "data/removed.txt", "two")
-      baseline = custom_report(
-        artifacts: [kept, removed],
-        discovered: %w[KeptTest#test_kept RemovedTest#test_removed],
-        selected: %w[KeptTest#test_kept RemovedTest#test_removed],
-        executed: %w[KeptTest#test_kept RemovedTest#test_removed],
-        dependencies: [["KeptTest#test_kept", kept], ["RemovedTest#test_removed", removed]],
-        selection_mode: :full
-      )
-      store.acquire_lease!
-      store.publish(baseline, outcomes: {"KeptTest#test_kept" => :passed, "RemovedTest#test_removed" => :passed})
-      store.acquire_lease!
-      store.publish(baseline, outcomes: {"KeptTest#test_kept" => :passed, "RemovedTest#test_removed" => :failed})
-
-      discovery = custom_report(
-        artifacts: [kept],
-        discovered: ["KeptTest#test_kept"],
-        selected: ["KeptTest#test_kept"],
-        executed: ["KeptTest#test_kept"],
-        dependencies: [["KeptTest#test_kept", kept]],
-        mode: :discover,
-        selection_mode: :full
-      )
-      store.acquire_lease!
-      published = store.publish(discovery, outcomes: {"KeptTest#test_kept" => :passed})
-
-      assert published.ready?
-      assert store.select([kept], context_signature: "context").none?
-      assert_empty store.explain("removed")
-      store.close
-    end
-  end
-
-  def test_hydration_rejects_a_stored_path_replaced_by_an_outside_symlink
-    with_project do |project|
-      source = write_file(File.join(project, "data", "input.txt"), "inside")
-      artifact = named_artifact("input", "data/input.txt", Digest::SHA256.hexdigest("inside"))
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      store.acquire_lease!
-      store.publish(
-        custom_report(
-          artifacts: [artifact], discovered: ["InputTest#test_input"],
-          selected: ["InputTest#test_input"], executed: ["InputTest#test_input"],
-          dependencies: [["InputTest#test_input", artifact]], selection_mode: :full
-        ),
-        outcomes: {"InputTest#test_input" => :passed}
-      )
-      with_project do |outside|
-        secret = write_file(File.join(outside, "secret.txt"), "secret")
-        File.delete(source)
-        File.symlink(secret, source)
-
-        selection = store.select([], context_signature: "context", roots: {project: project})
-        assert selection.full?
-        assert_equal ["path_unresolved"], selection.reasons
-      end
-      store.close
-    end
-  end
-
-  def test_promotion_rejects_an_incomplete_result_ledger
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      artifact = artifact_for("one")
-      report = custom_report(
-        artifacts: [artifact], discovered: ["ExampleTest#test_value"],
-        selected: ["ExampleTest#test_value"], executed: [],
-        dependencies: [], selection_mode: :full
-      )
-      store.acquire_lease!
-      rejected = store.publish(report, outcomes: {})
-
-      refute rejected.ready?
-      assert_equal "provider_incomplete", rejected.publication[:reason]
-      assert_nil store.generation
-      assert_equal "provider_incomplete", store.recovery_reason
-      store.close
-    end
-  end
-
-  def test_successful_publication_materializes_the_report_once
-    with_project do |project|
-      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
-      MaterializationCountingReport.materializations = 0
-      report = report_for(artifact_for("one"), report_class: MaterializationCountingReport)
-      run_id = SecureRandom.uuid
-
-      store.begin_run(run_id: run_id, mode: :run, context_signature: "context")
-      store.acquire_lease!(run_id: run_id)
-      published = store.publish(
-        report,
-        outcomes: {"ExampleTest#test_value" => :passed},
-        run_id: run_id
-      )
-
-      assert published.ready?
-      assert_equal 1, MaterializationCountingReport.materializations
-      store.close
-    end
-  end
-
-  def test_interrupt_rolls_back_publication_and_abandons_the_receipt_before_reporter_cleanup
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
-      run_id = SecureRandom.uuid
-      store = Minitest::Testmon::Store.new(path)
-      store.begin_run(run_id: run_id, mode: :run, context_signature: "context")
-      store.acquire_lease!(run_id: run_id)
-      database = store.instance_variable_get(:@database)
-      interrupted = false
-      cleanup_busy = false
-      database.define_singleton_method(:execute) do |sql, *binds, &block|
-        if !interrupted && sql.include?("INSERT INTO run_receipts")
-          interrupted = true
-          raise Interrupt, "forced Ctrl-C"
-        elsif interrupted && !cleanup_busy && sql == "BEGIN IMMEDIATE"
-          cleanup_busy = true
-          raise SQLite3::BusyException, "forced cleanup contention"
-        end
-        super(sql, *binds, &block)
-      end
-
-      error = assert_raises(Interrupt) do
-        reporter_for(
-          store,
-          report_for(artifact_for("one")),
-          outcomes: {"ExampleTest#test_value" => :passed},
-          run_id: run_id
-        ).report
-      end
-
-      assert_equal "forced Ctrl-C", error.message
-      inspected = Minitest::Testmon::Store.new(path)
-      assert_nil inspected.generation
-      receipt = inspected.runs(limit: 1).fetch(0)
-      assert_equal run_id, receipt.fetch("id")
-      assert_equal "abandoned", receipt.fetch("state")
-      assert_equal "provider_incomplete", receipt.fetch("publication_reason")
-      assert_equal "provider_incomplete", inspected.recovery_reason
-      assert inspected.acquire_lease!(run_id: SecureRandom.uuid)
-      assert inspected.release_lease!
-      inspected.close
-    end
-  end
-
-  def test_persistent_cleanup_contention_preserves_interrupt_for_dead_owner_recovery
-    skip "fork is required" unless Process.respond_to?(:fork)
-
-    with_project do |project|
-      path = File.join(project, "state.sqlite3")
-      run_id = SecureRandom.uuid
-      reader, writer = IO.pipe
-      child = fork do
-        reader.close
-        store = Minitest::Testmon::Store.new(path)
-        store.begin_run(run_id: run_id, mode: :run, context_signature: "context")
-        store.acquire_lease!(run_id: run_id)
-        database = store.instance_variable_get(:@database)
-        interrupted = false
-        database.define_singleton_method(:execute) do |sql, *binds, &block|
-          if !interrupted && sql.include?("INSERT INTO run_receipts")
-            interrupted = true
-            raise Interrupt, "forced Ctrl-C"
-          elsif interrupted && sql == "BEGIN IMMEDIATE"
-            raise SQLite3::BusyException, "persistent cleanup contention"
-          end
-          super(sql, *binds, &block)
-        end
-
-        begin
-          reporter_for(
-            store,
-            report_for(artifact_for("one")),
-            outcomes: {"ExampleTest#test_value" => :passed},
-            run_id: run_id
-          ).report
-        rescue Interrupt => error
-          writer.write(error.message)
-        ensure
-          writer.close
-        end
-        exit! 0
-      end
-      writer.close
-      message = reader.read
-      reader.close
-      _, status = Process.wait2(child)
-
-      assert status.success?
-      assert_equal "forced Ctrl-C", message
-      recovered = Minitest::Testmon::Store.new(path)
-      assert recovered.acquire_lease!(run_id: SecureRandom.uuid)
-      receipt = recovered.runs(limit: 1).fetch(0)
-      assert_equal run_id, receipt.fetch("id")
-      assert_equal "abandoned", receipt.fetch("state")
-      assert_equal "worker_incomplete", receipt.fetch("publication_reason")
-      assert recovered.release_lease!
-      recovered.close
+      assert_equal 1, Dir["#{path}.incompatible-*"].length
     end
   end
 
   private
 
-  def reporter_for(store, report, outcomes:, run_id:)
-    runtime = Object.new
-    runtime.instance_variable_set(:@run_id, run_id)
-    runtime.define_singleton_method(:merge_worker_spools!) { true }
-    runtime.define_singleton_method(:process_parallel?) { false }
-    runtime.define_singleton_method(:infrastructure_failure!) { |_reason| true }
-    session = Object.new
-    session.define_singleton_method(:finalize) { report }
-    reporter = Minitest::Testmon::RuntimeReporter.new(
-      runtime, nil, session, store, nil, mode: :discover
-    )
-    reporter.instance_variable_set(:@outcomes, outcomes)
-    reporter
+  def with_store
+    with_project do |project|
+      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
+      yield store
+    ensure
+      store&.close
+    end
   end
 
-  def artifact_for(digest)
-    Minitest::Testmon::Artifact.new(
-      key: "artifact", provider: :core, root: :project, relative_path: "lib/example.rb",
-      facet: "content", fingerprint: Minitest::Testmon::Fingerprint.known(digest),
-      members: [], scope: :test, test_ids: ["ExampleTest#test_value"], reason: nil
+  def selection_for(discovered, selected, revision)
+    Minitest::Testmon::Selection.new(
+      discovered: discovered,
+      selected: selected,
+      reasons_by_test: selected.to_h { |test_id| [test_id, ["test"]] },
+      base_revision: revision
     )
   end
 
-  def report_for(artifact, report_class: Minitest::Testmon::DiscoveryReport)
-    observation = Minitest::Testmon::Observation.build(kind: :file_read, path: artifact.relative_path, operation: :read, test_id: "ExampleTest#test_value")
-    report_class.new(
-      context_signature: "context",
-      mode: :run,
-      tests: {discovered: ["ExampleTest#test_value"], selected: ["ExampleTest#test_value"], executed: ["ExampleTest#test_value"]},
-      observations: [observation],
-      artifacts: [artifact],
-      dependencies: [Minitest::Testmon::Dependency.new(test_id: "ExampleTest#test_value", artifact_key: artifact.key, provider: :core, complete: true)],
-      observation_claims: {observation.key => [artifact.key]}
+  def input(key, digest)
+    Minitest::Testmon::Input.new(
+      key: key,
+      provider: "core@1",
+      facet: "content",
+      root: "project",
+      relative_path: "lib/#{key}.rb",
+      fingerprint: Minitest::Testmon::Fingerprint.known(digest)
     )
   end
 
-  def membership_artifact(digest, members)
-    Minitest::Testmon::Artifact.new(
-      key: "membership", provider: :core, root: :project, relative_path: "lib",
-      facet: "membership", fingerprint: Minitest::Testmon::Fingerprint.known(digest),
-      members: members, scope: :test, test_ids: [], reason: nil
+  def snapshot(test_id, value, run_id)
+    Minitest::Testmon::TestSnapshot.new(
+      test_id: test_id,
+      inputs: [value],
+      recorded_at: "2026-08-01T00:00:00Z",
+      run_id: run_id
     )
   end
 
-  def report_for_membership(artifacts, membership)
-    observation = Minitest::Testmon::Observation.build(
-      kind: :file_read,
-      path: "lib",
-      operation: :membership,
-      test_id: "ExampleTest#test_value"
-    )
-    Minitest::Testmon::DiscoveryReport.new(
-      context_signature: "context",
-      mode: :run,
-      tests: {
-        discovered: ["ExampleTest#test_value"],
-        selected: ["ExampleTest#test_value"],
-        executed: ["ExampleTest#test_value"]
-      },
-      observations: [observation],
-      artifacts: artifacts,
-      dependencies: artifacts.map do |artifact|
-        Minitest::Testmon::Dependency.new(
-          test_id: "ExampleTest#test_value",
-          artifact_key: artifact.key,
-          provider: :core,
-          complete: true
-        )
-      end,
-      observation_claims: {observation.key => artifacts.map(&:key)}
+  def evidence(run_id, selection, report, snapshots:, outcomes:, complete: true, source_stable: true)
+    Minitest::Testmon::RunEvidence.new(
+      run_id: run_id,
+      base_revision: selection.base_revision,
+      report: report,
+      selection: selection,
+      outcomes: outcomes,
+      snapshots: snapshots,
+      complete: complete,
+      source_stable: source_stable
     )
   end
 
-  def named_artifact(key, relative_path, digest)
-    Minitest::Testmon::Artifact.new(
-      key: key, provider: :core, root: :project, relative_path: relative_path,
-      facet: "content", fingerprint: Minitest::Testmon::Fingerprint.known(digest),
-      members: [], scope: :test, test_ids: [], reason: nil
-    )
+  def seed(store, values)
+    selected = values.keys.sort
+    selection = selection_for(selected, selected, store.revision)
+    report = Report.build(discovered: selected, selected: selected, executed: selected)
+    snapshots = values.to_h { |test_id, value| [test_id, snapshot(test_id, value, "seed")] }
+    store.acquire_lease!(run_id: "seed")
+    store.start_execution(run_id: "seed", selection: selection)
+    store.publish(evidence("seed", selection, report, snapshots: snapshots, outcomes: selected.to_h { |id| [id, :passed] }))
+    store.release_lease!
   end
 
-  def custom_report(
-    artifacts:, discovered:, selected:, executed:, dependencies:, mode: :run,
-    selection_mode: nil
-  )
-    Minitest::Testmon::DiscoveryReport.new(
-      context_signature: "context",
-      mode: mode,
-      tests: {discovered: discovered, selected: selected, executed: executed},
-      artifacts: artifacts,
-      dependencies: dependencies.map do |test_id, artifact|
-        Minitest::Testmon::Dependency.new(
-          test_id: test_id,
-          artifact_key: artifact.key,
-          provider: artifact.provider,
-          complete: true
-        )
-      end,
-      selection_mode: selection_mode
-    )
+  def outcomes(retries)
+    retries.transform_values(&:outcome)
   end
 end

@@ -76,12 +76,14 @@ module Minitest
     FacetSnapshot = Data.define(:name, :digest, :granularity, :scope, :artifact_keys)
 
     class ProviderDefinition
+      MEMBERSHIP_DIGEST = :paths
+      MEMBERSHIP_GRANULARITY = :set
       ALLOWED_FACETS = [
         %i[content file],
         %i[existence file],
         %i[paths set],
         %i[contents set],
-        %i[ruby_iseq file]
+        %i[ruby_source file]
       ].freeze
 
       attr_reader :id, :name, :version, :inventories, :facets, :claims, :observers, :ignores
@@ -194,7 +196,7 @@ module Minitest
         pair = [digest.to_sym, granularity.to_sym]
         unless ProviderDefinition::ALLOWED_FACETS.include?(pair)
           raise ConfigurationError,
-            "facet #{key} must be content/file, existence/file, paths/set, contents/set, or ruby_iseq/file"
+            "facet #{key} must be content/file, existence/file, paths/set, contents/set, or ruby_source/file"
         end
         scope = scope.to_sym
         raise ConfigurationError, "facet #{key} scope must be :test or :suite" unless %i[test suite].include?(scope)
@@ -289,6 +291,7 @@ module Minitest
       end
 
       def build
+        normalize_membership_facets!
         inventory_names = @inventories.map(&:name)
         @facets.each do |facet|
           unless inventory_names.include?(facet.inventory)
@@ -319,6 +322,50 @@ module Minitest
       end
 
       private
+
+      # Membership is an input of every declared inventory, not an optional
+      # optimization a provider author has to remember. It is always
+      # suite-scoped and SnapshotBuilder copies it onto every passing test.
+      # A claim declaration alone cannot prove that a provider observes both
+      # successful and unsuccessful lookups, so there is deliberately no
+      # test-scoped membership optimization.
+      def normalize_membership_facets!
+        @inventories.each do |inventory|
+          memberships = @facets.select do |facet|
+            facet.inventory == inventory.name &&
+              facet.digest == ProviderDefinition::MEMBERSHIP_DIGEST &&
+              facet.granularity == ProviderDefinition::MEMBERSHIP_GRANULARITY
+          end
+          if memberships.length > 1
+            raise ConfigurationError, "inventory #{inventory.name} must have exactly one membership facet"
+          end
+
+          membership = memberships.first || add_default_membership(inventory)
+          next if membership.scope == :suite
+
+          @facets[@facets.index(membership)] = membership.with(scope: :suite)
+        end
+      end
+
+      def add_default_membership(inventory)
+        candidate = :membership
+        if @facets.any? { |facet| facet.name == candidate }
+          candidate = :"#{inventory.name}_membership"
+        end
+        suffix = 2
+        while @facets.any? { |facet| facet.name == candidate }
+          candidate = :"#{inventory.name}_membership_#{suffix}"
+          suffix += 1
+        end
+
+        FacetDefinition.new(
+          name: candidate,
+          inventory: inventory.name,
+          digest: ProviderDefinition::MEMBERSHIP_DIGEST,
+          granularity: ProviderDefinition::MEMBERSHIP_GRANULARITY,
+          scope: :suite
+        ).tap { |facet| @facets << facet }
+      end
 
       def __observe_builtin_test_start(event_kind, details:)
         validate_callable!(details, "built-in test-start details")

@@ -16,15 +16,15 @@ class AdversarialAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_content_mutation_during_selected_test_rejects_publication_and_forces_full_recovery
+  def test_content_mutation_during_selected_test_rejects_publication_and_retries_the_test
     assert_during_test_mutation("content")
   end
 
-  def test_membership_mutation_during_selected_test_rejects_publication_and_forces_full_recovery
+  def test_membership_mutation_during_selected_test_rejects_publication_and_rechecks_suite_membership
     assert_during_test_mutation("membership")
   end
 
-  def test_symlink_mutation_during_selected_test_rejects_publication_and_forces_full_recovery
+  def test_symlink_mutation_during_selected_test_rejects_publication_and_retries_the_test
     assert_during_test_mutation("symlink")
   end
 
@@ -42,24 +42,23 @@ class AdversarialAcceptanceTest < Minitest::Test
 
   def test_delayed_background_thread_crossing_test_boundaries_is_never_attached_to_a_test
     with_adversarial_project do |project|
-      learn_baseline(project)
+      baseline = learn_baseline(project)
       project.write("data/background_trigger.txt", "trigger-v2\n")
 
       result, report = run_adversarial(project, env: {
         "ADVERSARIAL_BACKGROUND_BOUNDARY" => "1",
         "EXPECTED_BACKGROUND_TRIGGER" => "trigger-v2\n"
       })
-      assert result.success?, result.stderr
+      refute result.success?, "unattributed background execution unexpectedly published"
+      assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
+        baseline,
+        report,
+        reason: "provider_incomplete"
+      )
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_late_background_observation!(
         report,
         path_suffix: "data/background.txt"
       )
-      item = MinitestTestmonAcceptance::AdversarialOracle.assert_suite_scoped!(
-        report,
-        provider: "race_inputs@1",
-        path_suffix: "data/background.txt"
-      )
-      assert_equal "promoted_to_suite", item.fetch("reason")
     end
   end
 
@@ -70,7 +69,7 @@ class AdversarialAcceptanceTest < Minitest::Test
 
       changed, changed_report = run_adversarial(project, env: {"EXPECTED_CATALOG" => ""})
       assert changed.success?, changed.stderr
-      assert_only_test changed_report, "RaceInputTest#test_catalog_membership"
+      assert MinitestTestmonAcceptance::AdversarialOracle.assert_full_recovery!(changed_report)
 
       warm, warm_report = run_adversarial(project, env: {"EXPECTED_CATALOG" => ""})
       assert warm.success?, warm.stderr
@@ -85,7 +84,7 @@ class AdversarialAcceptanceTest < Minitest::Test
 
       changed, changed_report = run_adversarial(project, env: {"EXPECTED_CATALOG" => "renamed.txt"})
       assert changed.success?, changed.stderr
-      assert_only_test changed_report, "RaceInputTest#test_catalog_membership"
+      assert MinitestTestmonAcceptance::AdversarialOracle.assert_full_recovery!(changed_report)
 
       warm, warm_report = run_adversarial(project, env: {"EXPECTED_CATALOG" => "renamed.txt"})
       assert warm.success?, warm.stderr
@@ -93,28 +92,23 @@ class AdversarialAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_skipped_selected_test_retains_prior_edges_and_forces_full_recovery
+  def test_skipped_selected_test_retains_its_snapshot_and_retry_state
     with_adversarial_project do |project|
       baseline = learn_baseline(project)
       selected_id = find_test_id(baseline, "SkipSelectedTest#test_selected_input")
       project.write("data/skip.txt", "skip-v2\n")
 
       skipped, skipped_report = run_adversarial(project, env: {"ADVERSARIAL_SKIP_SELECTED" => "1"})
-      assert_equal 4, skipped.exitstatus,
-        "selected Minitest skip did not use the infrastructure-failure exit: #{skipped.stderr}"
+      assert skipped.success?, skipped.stderr
       assert_includes skipped_report.dig("tests", "selected"), selected_id
       assert_includes skipped_report.dig("tests", "executed"), selected_id
-      assert_equal false, skipped_report.dig("publication", "published"),
-        "selected skip was incorrectly published as a new baseline"
-      assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
-        baseline,
-        skipped_report,
-        reason: "test_skip"
-      )
+      assert_equal true, skipped_report.dig("publication", "published")
+      assert_equal baseline.fetch("generation"), skipped_report.fetch("generation")
 
       recovery, recovery_report = run_adversarial(project, env: {"EXPECTED_SKIP" => "skip-v2\n"})
       assert recovery.success?, recovery.stderr
-      assert MinitestTestmonAcceptance::AdversarialOracle.assert_full_recovery!(recovery_report)
+      assert_equal [selected_id], recovery_report.dig("tests", "selected")
+      assert_equal [selected_id], recovery_report.dig("tests", "executed")
 
       project.write("data/skip.txt", "skip-v3\n")
       selected, selected_report = run_adversarial(project, env: {"EXPECTED_SKIP" => "skip-v3\n"})
@@ -137,7 +131,7 @@ class AdversarialAcceptanceTest < Minitest::Test
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(baseline, failed_report)
 
       project.remove("test/removed_test.rb")
-      discovered = driver.discover(project)
+      discovered = driver.run(project, full: true)
       assert discovered.success?, discovered.stderr
       discovery_report = driver.report(project)
       assert_report_contract discovery_report
@@ -152,7 +146,7 @@ class AdversarialAcceptanceTest < Minitest::Test
 
   def test_complete_discovery_publishes_a_warm_baseline
     with_adversarial_project do |project|
-      discovered = driver.discover(project)
+      discovered = driver.run(project, full: true)
       assert discovered.success?, discovered.stderr
       report = driver.report(project)
       assert_report_contract report
@@ -170,7 +164,7 @@ class AdversarialAcceptanceTest < Minitest::Test
   def test_incomplete_discovery_is_nonzero_unpublished_and_actionable
     with_adversarial_project do |project|
       baseline = learn_baseline(project)
-      result = driver.discover(project, env: {"ADVERSARIAL_INCOMPLETE_DISCOVERY" => "1"})
+      result = driver.run(project, full: true, env: {"ADVERSARIAL_INCOMPLETE_DISCOVERY" => "1"})
       refute result.success?, "planted incomplete discovery exited zero"
       report = driver.report(project)
       assert_report_contract report
@@ -180,7 +174,7 @@ class AdversarialAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_stored_path_replaced_by_outside_root_fifo_is_rejected_without_reading_it
+  def test_stored_path_replaced_by_outside_root_fifo_is_rejected_without_publishing
     skip "FIFO support is required" unless File.respond_to?(:mkfifo)
 
     with_adversarial_project do |project|
@@ -206,8 +200,9 @@ class AdversarialAcceptanceTest < Minitest::Test
           report = driver.report(project)
           assert_report_contract report
           assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(baseline, report)
-          assert_empty report.dig("tests", "executed")
-          refute marker.exist?, "stored path followed the outside-root FIFO"
+          assert_equal report.dig("tests", "discovered"), report.dig("tests", "selected")
+          assert_equal report.dig("tests", "discovered"), report.dig("tests", "executed")
+          assert marker.exist?, "application fixture did not exercise the outside-root FIFO"
         ensure
           terminate_child(writer_pid)
         end
@@ -353,7 +348,7 @@ class AdversarialAcceptanceTest < Minitest::Test
 
       recovery, recovery_report = run_adversarial(project, env: recovered_env(kind))
       assert recovery.success?, recovery.stderr
-      assert MinitestTestmonAcceptance::AdversarialOracle.assert_full_recovery!(recovery_report)
+      assert_recovery_selection(kind, recovery_report)
     end
   end
 
@@ -392,6 +387,14 @@ class AdversarialAcceptanceTest < Minitest::Test
 
   def mutate_trigger(project, kind)
     project.write("data/#{kind}_trigger.txt", "trigger-v2\n")
+  end
+
+  def assert_recovery_selection(kind, report)
+    if %w[membership symlink].include?(kind)
+      assert MinitestTestmonAcceptance::AdversarialOracle.assert_full_recovery!(report)
+    else
+      assert_only_test report, "RaceInputTest#test_#{kind}_input"
+    end
   end
 
   def mutate_input(project, kind)

@@ -9,12 +9,12 @@ class ReportContractTest < Minitest::Test
     require_product!
 
     with_project("discovery") do |project|
-      result = driver.discover(project)
+      result = driver.run(project, full: true)
       refute result.success?, "incomplete discovery unexpectedly exited zero"
 
       report = driver.report(project)
       assert_report_contract report
-      assert_equal "discover", report.fetch("mode")
+      assert_equal "run", report.fetch("mode")
       assert_equal false, report.fetch("ready")
       assert_equal false, report.dig("publication", "published")
       assert_nil report.fetch("generation")

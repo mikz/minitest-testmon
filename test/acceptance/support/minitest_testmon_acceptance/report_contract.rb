@@ -3,8 +3,8 @@
 module MinitestTestmonAcceptance
   class ReportContract
     TOP_LEVEL_KEYS = %w[
-      schema_version mode ready generation context_signature bundles tests
-      observations inventory suggestions publication
+      schema_version mode complete ready diagnostics generation context_signature
+      bundles tests observations inventory suggestions publication
     ].freeze
     TEST_KEYS = %w[discovered selected executed].freeze
     OBSERVATION_KEYS = %w[claimed ignored uncovered unresolved].freeze
@@ -21,18 +21,16 @@ module MinitestTestmonAcceptance
       uncovered_file opaque_c_call uncovered_notification outside_root
       path_set_churn
     ].freeze
-    SCOPES = %w[test suite ambiguous].freeze
+    SCOPES = %w[test suite].freeze
     INVENTORY_SCOPES = %w[test suite none].freeze
-    FACETS = %w[content existence membership ruby_iseq].freeze
+    FACETS = %w[content existence membership ruby_source].freeze
     REASON_CODES = %w[
-      nonexistent outside_root excluded non_regular temporary
+      nonexistent outside_root non_regular
       conservative_file_construction opaque_c_call source_race
-      ambiguous_context late_activation provider_incomplete unsupported_iseq
-      worker_incomplete registry_drift
-      invalid_configuration context_changed user_ignored uncovered_file
+      ambiguous_context late_activation provider_incomplete worker_incomplete
+      invalid_configuration user_ignored uncovered_file
       uncovered_event observer_unavailable observer_error extractor_error
-      noncanonical_observation claim_path_missing claim_ambiguous
-      promoted_to_suite whole_file_fallback
+      noncanonical_observation claim_path_missing
     ].freeze
 
     class Violation < StandardError; end
@@ -43,7 +41,9 @@ module MinitestTestmonAcceptance
 
       fail!("schema_version must equal 2") unless report.fetch("schema_version") == 2
       string!(report.fetch("mode"), "mode")
+      boolean!(report.fetch("complete"), "complete")
       boolean!(report.fetch("ready"), "ready")
+      sorted_string_array!(report.fetch("diagnostics"), "diagnostics")
       nullable_integer!(report.fetch("generation"), "generation")
       nonempty_string!(report.fetch("context_signature"), "context_signature")
       sorted_string_array!(report.fetch("bundles"), "bundles")
@@ -53,6 +53,9 @@ module MinitestTestmonAcceptance
       validate_categories!(report.fetch("observations"), OBSERVATION_KEYS, :observation)
       validate_categories!(report.fetch("inventory"), INVENTORY_KEYS, :inventory)
       validate_publication!(report.fetch("publication"))
+      fail!("complete report cannot contain diagnostics") if report.fetch("complete") && !report.fetch("diagnostics").empty?
+      expected_ready = report.fetch("complete") && report.dig("publication", "published")
+      fail!("ready must equal complete && publication.published") unless report.fetch("ready") == expected_ready
       true
     end
 

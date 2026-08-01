@@ -3,6 +3,7 @@
 require "fileutils"
 require "minitest"
 require "securerandom"
+require "time"
 
 module Minitest
   module Testmon
@@ -17,17 +18,18 @@ module Minitest
           @configuration.database_path,
           retained_reports: @configuration.retained_reports
         )
-        @mode = ENV.fetch("MINITEST_TESTMON_MODE", "run").to_sym
+        @force_full = ENV["MINITEST_TESTMON_FULL"] == "1"
         @run_id = ENV["MINITEST_TESTMON_RUN_ID"] || SecureRandom.uuid
-        @store.begin_run(run_id: @run_id, mode: @mode, context_signature: @snapshot.signature)
         @process_parallel = false
         @exit_state = nil
       end
 
       def install(options)
+        ThreadContextPropagation.install!
         @exit_state = options.fetch(:minitest_testmon_exit_state)
-        discovered = discovered_tests
-        @session = @snapshot.observe(tests: {discovered: discovered}, selected: [], mode: @mode)
+        discovered = discovered_tests(options)
+        @discovered = discovered
+        @session = @snapshot.observe(tests: {discovered: discovered}, selected: [])
         Testmon.take_early_observations.each { |observation| @session.record(observation) }
         core_roots = @snapshot.ruby_inventory_roots
         core_paths = @snapshot.ruby_inventory_paths
@@ -44,32 +46,35 @@ module Minitest
           ruby_paths: core_paths,
           unhookable_ruby_paths: @snapshot.ruby_unhookable_paths,
           test_only: true,
-          observe_files: @mode == :discover || @snapshot.claims_event?(:file_open, :file_read),
+          observe_files: @force_full || @snapshot.claims_event?(:file_open, :file_read),
           boundary_tracker: @collector
         ).start)
+        @store.acquire_lease!(run_id: @run_id)
         reject_thread_parallelism!(discovered)
 
-        @process_parallel = rails_process_parallel?(discovered)
+        @process_parallel = rails_process_parallel?
         prepare_process_run if @process_parallel
-        @store.acquire_lease!(run_id: @run_id)
-        discard_recovered_worker_spools!
+        @current_inputs = current_inputs
         @selection = choose_selection
         unless @session.startup_complete?
-          @selection = Selection.new(mode: :full, tests: [], reasons: ["provider_incomplete"], generation: @store.generation)
+          @selection = Selection.new(
+            discovered: discovered,
+            selected: discovered,
+            reasons_by_test: discovered.to_h { |test_id| [test_id, ["provider_incomplete"]] },
+            base_revision: @store.revision
+          )
         end
-        selected = selected_tests(discovered, @selection)
-        @selected_tests = selected
-        @session.selected!(selected)
-        @session.selection_mode!(@selection.mode)
-        apply_selection(options, selected, @selection)
+        @store.start_execution(run_id: @run_id, selection: @selection)
+        @selected_tests = @selection.selected
+        @session.selected!(@selected_tests)
+        apply_selection(options, @selected_tests)
 
         install_process_worker_hooks if @process_parallel
 
-        reporter = RuntimeReporter.new(self, @collector, @session, @store, @configuration, mode: @mode)
+        reporter = RuntimeReporter.new(self, @collector, @session, @store, @configuration)
         Minitest.reporter << reporter
         reporter
       rescue LeaseUnavailable
-        write_rejected_report("cache_lease_unavailable", discovered || discovered_tests)
         @store.close
         raise
       end
@@ -83,6 +88,36 @@ module Minitest
         reason
       end
 
+      def evidence(report, outcomes, publication_reason: nil)
+        recorded_at = Time.now.utc.iso8601(6)
+        builder = SnapshotBuilder.new
+        snapshots = outcomes.filter_map do |test_id, outcome|
+          next unless outcome == :passed
+
+          snapshot = builder.call(
+            test_id: test_id,
+            current_inputs: @session.current_inputs,
+            claimed_input_ids: @session.claimed_input_ids(test_id),
+            test_definition_input: @snapshot.test_definition_input(test_id),
+            recorded_at: recorded_at,
+            run_id: @run_id
+          )
+          [test_id, snapshot]
+        end.to_h
+        source_stable = @snapshot.source_stable?
+        RunEvidence.new(
+          run_id: @run_id,
+          base_revision: @selection.base_revision,
+          report: report,
+          selection: @selection,
+          outcomes: outcomes,
+          snapshots: snapshots,
+          complete: report.complete?,
+          source_stable: source_stable,
+          publication_reason: publication_reason
+        )
+      end
+
       def merge_worker_spools!
         return unless process_parallel?
         raise PhaseError, "only the original parent may merge worker evidence" unless Process.pid == @parent_pid
@@ -92,7 +127,7 @@ module Minitest
           run_id: @run_id,
           worker_count: @worker_count,
           context_signature: @snapshot.signature,
-          generation: @selection.generation,
+          base_revision: @selection.base_revision,
           expected_tests: @selected_tests
         )
         merged.observations.each { |observation| @session.import_observation(observation) }
@@ -107,64 +142,49 @@ module Minitest
       private
 
       def choose_selection
-        return Selection.new(mode: :full, tests: [], reasons: ["discovery"], generation: @store.generation) if @mode == :discover
-        selection_from_environment || @store.select(
-          @snapshot.context.artifacts,
-          context_signature: @snapshot.signature,
-          roots: @configuration.roots
+        Selector.new.call(
+          discovered: @discovered,
+          current_inputs: @current_inputs,
+          snapshots: @store.snapshots_for(@discovered),
+          retries: @store.retries_for(@discovered),
+          force: @force_full,
+          base_revision: @store.revision
         )
       end
 
-      def discovered_tests
+      def discovered_tests(options)
         Minitest::Runnable.runnables.flat_map do |klass|
-          klass.runnable_methods.map { |method| "#{klass}##{method}" }
+          klass.filter_runnable_methods(options).map { |method| "#{klass}##{method}" }
         end.uniq.sort
       end
 
-      def selected_tests(discovered, selection)
-        case selection.mode
-        when :full then discovered
-        when :subset then discovered & selection.tests
-        when :none then []
-        else discovered
-        end
-      end
-
-      def selection_from_environment
-        payload = ENV["MINITEST_TESTMON_SELECTION"]
-        return unless payload
-        parsed = CanonicalJSON.parse(payload)
-        return unless parsed["context_signature"] == @snapshot.signature
-        return unless parsed["generation"] == @store.generation
-        unless parsed["snapshot_digest"] == @snapshot.snapshot_digest
-          @session.incomplete(:source_drift)
-          return Selection.new(
-            mode: :full,
-            tests: [],
-            reasons: ["source_drift"],
-            generation: @store.generation
-          )
-        end
-        mode = parsed.fetch("mode").to_sym
-        return unless %i[full subset none].include?(mode)
-        Selection.new(
-          mode: mode,
-          tests: Array(parsed["tests"]).map(&:to_s).uniq.sort,
-          reasons: Array(parsed["reasons"]).map(&:to_s).uniq.sort,
-          generation: parsed["generation"]
-        )
-      rescue JSON::ParserError, KeyError
-        nil
-      end
-
-      def apply_selection(options, selected, selection)
-        case selection.mode
-        when :subset
-          exact = selected.map { |test_id| Regexp.escape(test_id) }
-          options[:include] = Regexp.new("\\A(?:#{exact.join("|")})\\z")
-        when :none
+      def apply_selection(options, selected)
+        exact = selected.map { |test_id| Regexp.escape(test_id) }
+        if exact.empty?
+          # Minitest treats an empty positive filter as a usage failure. A
+          # universal exclusion represents the same empty intersection while
+          # retaining a successful zero-test run.
           options[:include] = nil
           options[:exclude] = /.*/
+        else
+          options[:include] = Regexp.new("\\A(?:#{exact.join("|")})\\z")
+        end
+      end
+
+      def current_inputs
+        return @snapshot.current_inputs if @snapshot.respond_to?(:current_inputs)
+
+        @snapshot.context.artifacts.map do |artifact|
+          Input.new(
+            key: artifact.key,
+            provider: artifact.provider,
+            facet: artifact.facet,
+            root: artifact.root,
+            relative_path: artifact.relative_path,
+            fingerprint: artifact.fingerprint,
+            members: artifact.members,
+            scope: artifact.scope
+          )
         end
       end
 
@@ -179,22 +199,34 @@ module Minitest
           runnable.respond_to?(:run_order) && runnable.run_order == :parallel
         end
         executor = rails_executor
-        rails_threads = executor && executor.parallelize_with == :threads && parallel_executor_will_run?(executor, discovered)
+        rails_threads = executor && executor.parallelize_with == :threads && parallel_executor_will_run?(executor)
         return unless native_parallel || rails_threads
         message = "unsupported_parallelism: minitest-testmon supports serial tests and Rails process parallelization; test threads are unsupported"
+        @selection = Selection.new(
+          discovered: discovered,
+          selected: [],
+          reasons_by_test: {},
+          base_revision: @store.revision
+        )
+        @store.start_execution(run_id: @run_id, selection: @selection)
         write_rejected_report("unsupported_parallelism", discovered)
         @store.close
         raise UnsupportedParallelism, message
       end
 
-      def rails_process_parallel?(discovered)
+      def rails_process_parallel?
         executor = rails_executor
-        executor && executor.parallelize_with == :processes && parallel_executor_will_run?(executor, discovered)
+        executor && executor.parallelize_with == :processes && parallel_executor_will_run?(executor)
       end
 
-      def parallel_executor_will_run?(executor, discovered)
+      def parallel_executor_will_run?(executor)
         return false unless executor.size.to_i > 1
-        ENV.key?("PARALLEL_WORKERS") || discovered.length > executor.threshold.to_i
+
+        ENV["PARALLEL_WORKERS"] || rails_tests_count > executor.threshold.to_i
+      end
+
+      def rails_tests_count
+        Minitest::Runnable.runnables.sum { |runnable| runnable.runnable_methods.size }
       end
 
       def install_process_worker_hooks
@@ -206,14 +238,6 @@ module Minitest
 
       def prepare_process_run
         @worker_count = rails_executor.size.to_i
-      end
-
-      def discard_recovered_worker_spools!
-        return unless @store.recovery_reason == "worker_incomplete"
-        WorkerSpool.discard_incomplete_run(
-          project_root: @configuration.project_root,
-          run_id: @store.recovered_run_id
-        )
       end
 
       def discard_validated_worker_run!
@@ -237,7 +261,7 @@ module Minitest
           run_id: @run_id,
           worker_number: worker_number,
           context_signature: @snapshot.signature,
-          generation: @selection.generation
+          base_revision: @selection.base_revision
         )
         @session.attach_spool(@worker_spool)
         @boundary_observer = TestBoundaryObserver.new(@session, @collector).start
@@ -284,19 +308,15 @@ module Minitest
       end
 
       def write_rejected_report(reason, discovered)
-        selected = if @selection
-          selected_tests(discovered, @selection)
-        else
-          []
-        end
+        selected = @selection ? @selection.selected : []
         if @session
           @session.selected!(selected)
-          report = @session.finalize.with_generation(@store.generation).unpublished(reason)
+          report = @session.finalize.with_generation(@store.revision).unpublished(reason)
         else
           report = DiscoveryReport.new(
-            generation: @store.generation,
+            generation: @store.revision,
             context_signature: @snapshot.signature,
-            mode: @mode,
+            mode: :run,
             bundles: @snapshot.registrations.map { |item| "#{item.name}@#{item.version}" },
             tests: {discovered: discovered, selected: selected, executed: []},
             artifacts: @snapshot.context.artifacts,
@@ -306,21 +326,30 @@ module Minitest
             resolver: @snapshot.context.resolver
           )
         end
-        @store.record_report(@run_id, report)
+        @store.publish(RunEvidence.new(
+          run_id: @run_id,
+          base_revision: @selection&.base_revision,
+          report: report,
+          selection: @selection,
+          outcomes: {},
+          snapshots: {},
+          complete: false,
+          source_stable: false,
+          publication_reason: reason
+        ))
       rescue Error, SQLite3::Exception, SystemCallError
         nil
       end
     end
 
     class RuntimeReporter < Minitest::AbstractReporter
-      def initialize(runtime, collector, session, store, configuration, mode:)
+      def initialize(runtime, collector, session, store, configuration)
         super()
         @runtime = runtime
         @collector = collector
         @session = session
         @store = store
         @configuration = configuration
-        @mode = mode
         @outcomes = {}
         @outcome_counts = Hash.new(0)
       end
@@ -353,34 +382,13 @@ module Minitest
       def report
         @runtime.merge_worker_spools!
         report = @session.finalize
-        published = if @mode == :discover
-          @store.publish(report, outcomes: @outcomes, run_id: @runtime.instance_variable_get(:@run_id))
-        elsif @runtime.selection.none?
-          generation = @store.generation
-          if report.complete?
-            certified = report.certified(generation)
-            @store.certify(certified, run_id: @runtime.instance_variable_get(:@run_id))
-          else
-            @store.publish(report, outcomes: @outcomes, run_id: @runtime.instance_variable_get(:@run_id))
-          end
-        else
-          publication_reason = @runtime.selection.reasons.find do |reason|
-            %w[cache_corrupt_rebuilt context_changed].include?(reason)
-          end
-          @store.publish(
-            report,
-            outcomes: @outcomes,
-            publication_reason: publication_reason,
-            run_id: @runtime.instance_variable_get(:@run_id)
-          )
-        end
+        evidence = @runtime.evidence(report, @outcomes)
+        published = @store.publish(evidence)
         @runtime.infrastructure_failure!(published.publication[:reason]) if !published.publication[:published] &&
           published.publication[:reason] != "test_failure"
       rescue => error
         @runtime.infrastructure_failure!(:provider_incomplete)
         warn error.message
-        rejected = report&.with_generation(@store.generation)&.unpublished("provider_incomplete")
-        @store.record_report(@runtime.instance_variable_get(:@run_id), rejected) if rejected && @store.connected?
       ensure
         close_store(preserving: $!)
       end

@@ -58,7 +58,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_config_source_change_forces_full_context_run_and_discovery_edits_no_config
+  def test_config_source_change_selects_all_through_context_input_and_full_run_edits_no_config
     with_provider_project do |project|
       ruby_config = project.path.join(".minitest-testmon.rb")
       yaml_decoy = project.path.join(".minitest-testmon.yml")
@@ -71,14 +71,14 @@ class ProviderDslAcceptanceTest < Minitest::Test
       assert result.success?, result.stderr
       assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(report)
       refute_equal baseline.fetch("context_signature"), report.fetch("context_signature")
-      assert_equal "context_changed", report.dig("publication", "reason")
+      assert_nil report.dig("publication", "reason")
       assert_equal baseline.fetch("generation") + 1, report.fetch("generation")
       assert_equal "#{ruby_before}\n# context digest acceptance change\n", ruby_config.read
       assert_equal yaml_digest, Digest::SHA256.file(yaml_decoy).hexdigest,
         "YAML decoy was parsed or rewritten as Testmon configuration"
 
       config_digest = Digest::SHA256.file(ruby_config).hexdigest
-      discovery = driver.discover(project)
+      discovery = driver.run(project, full: true)
       assert discovery.success?, discovery.stderr
       assert_report_contract driver.report(project)
       assert_equal config_digest, Digest::SHA256.file(ruby_config).hexdigest,
@@ -106,7 +106,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_membership_add_delete_and_rename_select_exactly_the_catalog_consumer
+  def test_membership_add_delete_and_rename_select_every_discovered_test
     with_provider_project do |project|
       learn_provider_baseline(project)
       project.write("templates/gamma.txt", "gamma\n")
@@ -115,19 +115,19 @@ class ProviderDslAcceptanceTest < Minitest::Test
         "EXPECTED_TEMPLATES" => "alpha.txt,beta.txt,gamma.txt"
       })
       assert added.success?, added.stderr
-      assert_only_provider_test added_report, "TemplateCatalogTest#test_template_membership"
+      assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(added_report)
 
       project.remove("templates/gamma.txt")
       deleted, deleted_report = run_provider(project)
       assert deleted.success?, deleted.stderr
-      assert_only_provider_test deleted_report, "TemplateCatalogTest#test_template_membership"
+      assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(deleted_report)
 
       FileUtils.mv(project.path.join("templates/alpha.txt"), project.path.join("templates/renamed.txt"))
       renamed, renamed_report = run_provider(project, extra_env: {
         "EXPECTED_TEMPLATES" => "beta.txt,renamed.txt"
       })
       assert renamed.success?, renamed.stderr
-      assert_only_provider_test renamed_report, "TemplateCatalogTest#test_template_membership"
+      assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(renamed_report)
     end
   end
 
@@ -137,7 +137,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
       notification_marker = project.path.join("tmp/notification-wrapper.json")
       resolver_marker = project.path.join("tmp/resolver-wrapper.json")
       FileUtils.mkdir_p(trace_marker.dirname)
-      result = driver.discover(project, env: {
+      result = driver.run(project, full: true, env: {
         "TRACE_WRAPPER_MARKER" => trace_marker.to_s,
         "NOTIFICATION_WRAPPER_MARKER" => notification_marker.to_s,
         "RESOLVER_WRAPPER_MARKER" => resolver_marker.to_s
@@ -248,7 +248,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
 
   def test_runtime_created_matching_file_never_joins_frozen_inventory
     with_provider_project do |project|
-      result = driver.discover(project, env: {"PROBE_RUNTIME_ARTIFACT" => "1"})
+      result = driver.run(project, full: true, env: {"PROBE_RUNTIME_ARTIFACT" => "1"})
       assert result.success?, result.stderr
       report = driver.report(project)
       assert_report_contract report
@@ -262,7 +262,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
 
   def test_outside_root_access_is_excluded_and_suggests_an_explicit_root
     with_provider_project do |project|
-      result = driver.discover(project, env: {"PROBE_SUGGESTIONS" => "1"})
+      result = driver.run(project, full: true, env: {"PROBE_SUGGESTIONS" => "1"})
       refute result.success?, "outside-root/opaque discovery unexpectedly exited zero"
       report = driver.report(project)
       assert_report_contract report
@@ -282,7 +282,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
   def test_structured_suggestions_are_complete_exact_and_cross_root_deterministic
     reports = 2.times.map do
       project = MinitestTestmonAcceptance::Project.copy_fixture("provider_dsl")
-      result = driver.discover(project, env: {"PROBE_SUGGESTIONS" => "1"})
+      result = driver.run(project, full: true, env: {"PROBE_SUGGESTIONS" => "1"})
       refute result.success?, "suggestion discovery unexpectedly exited zero"
       report = driver.report(project)
       assert_report_contract report
@@ -309,7 +309,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
       during = project.path.join("tmp/notification-during")
       after = project.path.join("tmp/notification-after")
       FileUtils.mkdir_p(during.dirname)
-      result = driver.discover(project, env: {
+      result = driver.run(project, full: true, env: {
         "NOTIFICATION_DURING_MARKER" => during.to_s,
         "NOTIFICATION_AFTER_MARKER" => after.to_s
       })
@@ -356,8 +356,9 @@ class ProviderDslAcceptanceTest < Minitest::Test
       project.write("provider_definition_snapshot.rb", probe.read)
       output = project.path.join("tmp/rails-provider-definitions.json")
       FileUtils.mkdir_p(output.dirname)
-      result = driver.discover(
+      result = driver.run(
         project,
+        full: true,
         env: runtime.env.merge("PROVIDER_DEFINITION_SNAPSHOT" => output.to_s)
       )
       assert result.success?, result.stderr
@@ -440,14 +441,17 @@ class ProviderDslAcceptanceTest < Minitest::Test
       assert_observation_reason first_report, reason
       assert MinitestTestmonAcceptance::ProviderOracle.assert_preserved_publication!(baseline, first_report)
 
-      full_result, full_report = run_provider(project, extra_env: expected_env.merge(failure_env))
-      refute full_result.success?, "repeated #{reason} unexpectedly published"
-      assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(full_report)
-      assert_observation_reason full_report, reason
+      selected = first_report.dig("tests", "selected")
+      repeated_result, repeated_report = run_provider(project, extra_env: expected_env.merge(failure_env))
+      refute repeated_result.success?, "repeated #{reason} unexpectedly published"
+      assert_equal selected, repeated_report.dig("tests", "selected")
+      assert_equal selected, repeated_report.dig("tests", "executed")
+      assert_observation_reason repeated_report, reason
 
       recovery, recovery_report = run_provider(project, extra_env: expected_env)
       assert recovery.success?, recovery.stderr
-      assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(recovery_report)
+      assert_equal selected, recovery_report.dig("tests", "selected")
+      assert_equal selected, recovery_report.dig("tests", "executed")
       assert_equal true, recovery_report.dig("publication", "published")
       assert_equal baseline.fetch("generation") + 1, recovery_report.fetch("generation")
     end
@@ -484,7 +488,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
       "existence set facet" => facet_configuration(:existence, :set),
       "paths file facet" => facet_configuration(:paths, :file),
       "contents file facet" => facet_configuration(:contents, :file),
-      "ruby iseq set facet" => facet_configuration(:ruby_iseq, :set),
+      "ruby source set facet" => facet_configuration(:ruby_source, :set),
       "invalid facet scope" => facet_configuration(:content, :file, scope: :global),
       "facet missing inventory" => <<~RUBY,
         config.provider :missing_inventory, version: 1 do |provider|

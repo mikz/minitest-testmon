@@ -47,7 +47,10 @@ module Minitest
     end
     Testmon.configuration.database(options[:testmon_database] || ENV["MINITEST_TESTMON_DB"]) if options[:testmon_database] || ENV["MINITEST_TESTMON_DB"]
     Testmon.activate_rails_8_1!
-    Testmon::Runtime.new(configuration: Testmon.configuration, registry: Testmon.registry).install(options)
+    Testmon::Runtime.new(
+      configuration: Testmon.configuration,
+      registry: Testmon.registry
+    ).install(options)
   rescue => error
     raise unless defined?(Testmon::Error) && error.is_a?(Testmon::Error)
 
@@ -63,12 +66,12 @@ module Minitest
       partial = []
       command = ENV["MINITEST_TESTMON_RAILS_COMMAND"]
       partial << "test:* task" unless %w[test t].include?(command)
-      partial << "test paths" if Array(options[:test_files]).any?
+      partial << "test paths" if Array(options[:test_files]).any? && !rails_all_suite_testmon?(options)
       partial << "--include/--name" if options[:include]
       partial << "--exclude" if options[:exclude]
       partial << "DEFAULT_TEST" if ENV.key?("DEFAULT_TEST")
       partial << "DEFAULT_TEST_EXCLUDE" if ENV.key?("DEFAULT_TEST_EXCLUDE")
-      message ||= "--testmon requires the complete default Rails test suite; remove #{partial.join(", ")}" if partial.any?
+      message ||= "--testmon requires a complete Rails test suite (bin/rails test or bin/rails test:all); remove #{partial.join(", ")}" if partial.any?
     end
     return unless message
 
@@ -86,6 +89,15 @@ module Minitest
   def self.rails_testmon?(options)
     direct_rails_testmon?(options) ||
       (options[:testmon] && ENV["MINITEST_TESTMON_RAILS_COMMAND"] == "test")
+  end
+
+  # `bin/rails test:all` reaches Minitest as the plain `test` command carrying
+  # the profile's complete-suite globs (Configuration#complete_suite_globs);
+  # that exact set is the only test-path shape still denoting a complete suite.
+  def self.rails_all_suite_testmon?(options)
+    return false unless rails_testmon?(options)
+    files = Array(options[:test_files]).map(&:to_s).uniq.sort
+    !files.empty? && files == Testmon.configuration.complete_suite_globs
   end
 
   def self.exit_testmon!(options, status)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require_relative "input"
 
 module Minitest
   module Testmon
@@ -72,7 +73,12 @@ module Minitest
       end
 
       def claim(artifact, observation, provider: artifact.provider)
-        artifact = artifact.with(scope: :suite, reason: :promoted_to_suite) if observation.reason == :late_activation
+        if observation.scope == :suite && artifact.scope != :suite
+          reason = (observation.reason == :late_activation) ? :late_activation : :ambiguous_context
+          incomplete(reason)
+          unresolved(observation, reason)
+          return
+        end
         test_id = (observation.scope == :suite) ? "*" : observation.test_id
         unless test_id == "*"
           artifact = artifact.with(
@@ -123,7 +129,8 @@ module Minitest
 
     class ProviderSnapshot
       attr_reader :configuration, :registrations, :context, :signature, :snapshot_digest,
-        :ruby_inventory_paths, :ruby_inventory_roots, :ruby_unhookable_paths
+        :ruby_inventory_paths, :ruby_inventory_roots, :ruby_unhookable_paths,
+        :current_inputs, :current_inputs_by_id
 
       def initialize(configuration, registrations, context)
         @configuration = configuration
@@ -135,9 +142,23 @@ module Minitest
           capabilities: context.capabilities
         }
         @signature = Digest::SHA256.hexdigest(CanonicalJSON.generate(payload))
+        inputs = context.artifacts.map(&:to_input)
+        inputs << Input.new(
+          key: "$context",
+          provider: "testmon@#{Testmon::VERSION}",
+          facet: :context,
+          fingerprint: Fingerprint.known(@signature),
+          scope: :suite
+        )
+        duplicates = inputs.group_by(&:id).select { |_id, matches| matches.length > 1 }.keys
+        unless duplicates.empty?
+          raise PhaseError, "duplicate provider input identities: #{duplicates.map(&:to_s).sort.join(", ")}"
+        end
+        @current_inputs = inputs.sort_by { |input| input.id.to_s }.freeze
+        @current_inputs_by_id = @current_inputs.to_h { |input| [input.id, input] }.freeze
         @snapshot_digest = digest_snapshot(registrations, context)
         ruby_artifacts = context.artifacts.select do |artifact|
-          artifact.provider == ruby_provider_id && artifact.facet == "ruby_iseq"
+          artifact.provider == ruby_provider_id && artifact.facet == "ruby_source"
         end
         @ruby_inventory_paths = ruby_artifacts.map do |artifact|
           File.expand_path(artifact.relative_path, context.resolver.root(artifact.root))
@@ -146,8 +167,29 @@ module Minitest
         @ruby_unhookable_paths = context.ruby_unhookable_paths(ruby_provider_id)
       end
 
-      def observe(tests: {}, selected: [], mode: :discover)
-        ProviderSession.new(self, tests: tests, selected: selected, mode: mode).start
+      def observe(tests: {}, selected: [])
+        ProviderSession.new(self, tests: tests, selected: selected).start
+      end
+
+      def test_definition_input(test_id)
+        class_name, separator, method_name = test_id.to_s.rpartition("#")
+        return unless separator == "#" && !class_name.empty? && !method_name.empty?
+
+        runnable = if defined?(Minitest::Runnable)
+          Minitest::Runnable.runnables.find { |candidate| candidate.to_s == class_name }
+        end
+        runnable ||= constantize_test_class(class_name)
+        location = runnable&.instance_method(method_name)&.source_location
+        return unless location&.first
+
+        locator = context.resolver.resolve(location.first)
+        candidates = current_inputs.select do |input|
+          input.root == locator.root.to_s && input.relative_path == locator.relative_path
+        end
+        candidates.find { |input| input.facet == "content" } ||
+          candidates.find { |input| input.facet == "ruby_source" }
+      rescue NameError, PathError
+        nil
       end
 
       def claims_event?(*event_kinds)
@@ -184,6 +226,14 @@ module Minitest
 
       private
 
+      def constantize_test_class(name)
+        name.split("::").reject(&:empty?).reduce(Object) do |owner, part|
+          owner.const_get(part, false)
+        end
+      rescue NameError
+        nil
+      end
+
       def ruby_provider_id
         registration = registrations.find { |item| item.name == :ruby }
         definition = registration&.provider&.definition
@@ -206,13 +256,12 @@ module Minitest
     end
 
     class ProviderSession
-      attr_reader :snapshot
+      attr_reader :snapshot, :claimed_input_ids_by_test, :current_inputs
 
-      def initialize(snapshot, tests:, selected:, mode:)
+      def initialize(snapshot, tests:, selected:)
         @snapshot = snapshot
         @tests = tests
         @selected = selected
-        @mode = mode
         @observations = []
         @handles = []
         @executed = []
@@ -220,7 +269,8 @@ module Minitest
         @startup_complete = true
         @spool = nil
         @phase = :created
-        @selection_mode = nil
+        @claimed_input_ids_by_test = {}.freeze
+        @current_inputs = snapshot.current_inputs
       end
 
       def start
@@ -254,9 +304,8 @@ module Minitest
         @selected = Array(test_ids).map(&:to_s).uniq.sort
       end
 
-      def selection_mode!(mode)
-        raise PhaseError, "selection is closed" unless @phase == :observing
-        @selection_mode = mode.to_sym
+      def claimed_input_ids(test_id)
+        @claimed_input_ids_by_test.fetch(test_id.to_s, [].freeze)
       end
 
       def startup_complete?
@@ -348,10 +397,14 @@ module Minitest
 
         claims = ClaimContext.new(snapshot.context, @observations)
         @runtime_diagnostics.each { |reason| claims.incomplete(reason) }
-        validate_execution_ledger(claims)
         @observations.each do |observation|
-          if observation.reason == :opaque_c_call && observation.details["candidate_path"]
-            candidate = observation.with(path: observation.details["candidate_path"], reason: nil)
+          # Late activation is a run-level completeness failure. A provider may
+          # classify the observation as ignored for reporting, but it cannot
+          # make evidence collected before its observer started complete.
+          claims.incomplete(:late_activation) if observation.reason == :late_activation
+          candidate_path = observation.details["candidate_path"] || observation.details[:candidate_path]
+          if observation.reason == :opaque_c_call && candidate_path
+            candidate = observation.with(path: candidate_path, reason: nil)
             ignored = snapshot.registrations.any? do |registration|
               registration.provider.respond_to?(:ignore_observation) &&
                 registration.provider.ignore_observation(candidate, claims, any_kind: true)
@@ -380,25 +433,45 @@ module Minitest
           claims.incomplete("provider_incomplete:#{registration.name}:#{error.class}")
         end
         claims.incomplete(:source_drift) unless snapshot.source_stable?
+        @claimed_input_ids_by_test = claims.dependencies
+          .reject { |dependency| dependency.test_id == "*" }
+          .group_by(&:test_id)
+          .to_h do |test_id, dependencies|
+            ids = dependencies.map do |dependency|
+              InputId.new(provider: dependency.provider, key: dependency.artifact_key)
+            end.uniq.sort_by(&:to_s).freeze
+            [test_id.to_s.freeze, ids]
+          end
+          .sort_by(&:first)
+          .to_h
+          .freeze
+        artifacts = deduplicate_artifacts(claims.artifacts)
+        context_input = snapshot.current_inputs.find { |input| input.key == "$context" }
+        inputs = artifacts.map(&:to_input)
+        inputs << context_input if context_input
+        duplicates = inputs.group_by(&:id).select { |_id, matches| matches.length > 1 }.keys
+        unless duplicates.empty?
+          claims.incomplete("duplicate_provider_input:#{duplicates.map(&:to_s).sort.join(",")}")
+        end
+        @current_inputs = inputs.uniq(&:id).sort_by { |input| input.id.to_s }.freeze
         @phase = :finalized
 
         DiscoveryReport.new(
           context_signature: snapshot.signature,
-          mode: @mode,
+          mode: :run,
           tests: {
             discovered: Array(@tests[:discovered]),
             selected: @selected,
             executed: @executed
           },
           observations: claims.observations,
-          artifacts: deduplicate_artifacts(claims.artifacts),
+          artifacts: artifacts,
           dependencies: claims.dependencies.uniq,
           observation_claims: claims.observation_claims,
           bundles: snapshot.registrations.map { |item| "#{item.name}@#{item.version}" },
           diagnostics: claims.diagnostics,
           complete: true,
-          resolver: snapshot.context.resolver,
-          selection_mode: @selection_mode
+          resolver: snapshot.context.resolver
         )
       end
 
@@ -407,19 +480,6 @@ module Minitest
       def transition!(from, to)
         raise PhaseError, "expected #{from} phase, got #{@phase}" unless @phase == from
         @phase = to
-      end
-
-      def validate_execution_ledger(claims)
-        return unless @selection_mode
-
-        discovered = Array(@tests[:discovered]).map(&:to_s).uniq.sort
-        selected = @selected.map(&:to_s).uniq.sort
-        executed_counts = @executed.map(&:to_s).tally
-        claims.incomplete(:duplicate_test_execution) unless executed_counts.values.all? { |count| count == 1 }
-        claims.incomplete(:execution_ledger_mismatch) unless executed_counts.keys.sort == selected
-        if @selection_mode == :full || @mode.to_sym == :discover
-          claims.incomplete(:discovery_ledger_mismatch) unless selected == discovered
-        end
       end
 
       def discovery_observation?(observation)
@@ -433,7 +493,7 @@ module Minitest
           base.with(
             scope: scope,
             test_ids: (scope == :suite) ? [].freeze : values.flat_map(&:test_ids).compact.uniq.sort.freeze,
-            reason: (values.any? { |item| item.reason == :promoted_to_suite }) ? :promoted_to_suite : base.reason
+            reason: base.reason
           )
         end
       end

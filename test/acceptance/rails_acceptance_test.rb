@@ -53,7 +53,7 @@ class RailsAcceptanceTest < Minitest::Test
         Minitest::Testmon.configure { |config| config.disable_bundle :rails_8_1 }
       RUBY
 
-      result = driver.discover(project, env: runtime.env)
+      result = driver.run(project, full: true, env: runtime.env)
       assert result.success?, rails_failure("Rails discovery with disabled umbrella", result)
       report = driver.report(project)
       assert_report_contract report
@@ -132,14 +132,14 @@ class RailsAcceptanceTest < Minitest::Test
       })
       assert added_result.success?, rails_failure("template membership addition", added_result)
       assert_selected_includes added_report, "GreetingViewLookupTest#test_optional_template_membership"
-      assert_not_selected added_report, "UnrelatedTest#test_unrelated"
+      assert_equal added_report.dig("tests", "discovered"), added_report.dig("tests", "selected")
       assert_provider_claim added_report, provider: "rails.views@1", facet: "membership"
 
       project.remove("app/views/greetings/optional.html.erb")
       deleted_result, deleted_report = run_rails(project, runtime)
       assert deleted_result.success?, rails_failure("template membership deletion", deleted_result)
       assert_selected_includes deleted_report, "GreetingViewLookupTest#test_optional_template_membership"
-      assert_not_selected deleted_report, "UnrelatedTest#test_unrelated"
+      assert_equal deleted_report.dig("tests", "discovered"), deleted_report.dig("tests", "selected")
     end
 
     with_rails_project do |project, runtime|
@@ -152,7 +152,7 @@ class RailsAcceptanceTest < Minitest::Test
       result, report = run_rails(project, runtime)
       refute result.success?, "renamed rendered template unexpectedly passed"
       assert_selected_includes report, "GreetingsControllerTest#test_show"
-      assert_not_selected report, "UnrelatedTest#test_unrelated"
+      assert_equal report.dig("tests", "discovered"), report.dig("tests", "selected")
       assert_equal false, report.dig("publication", "published")
     end
   end
@@ -251,9 +251,7 @@ class RailsAcceptanceTest < Minitest::Test
         "bounded worker-kill recovery failed or timed out: #{recovery.stdout}\n#{recovery.stderr}"
       recovery_report = driver.report(project)
       assert_report_contract recovery_report
-      assert_equal recovery_report.dig("tests", "discovered"), recovery_report.dig("tests", "selected"),
-        "dead-lease recovery did not force a full clean selection"
-      assert_equal recovery_report.dig("tests", "discovered"), recovery_report.dig("tests", "executed")
+      assert_only_selected recovery_report, "GreetingsControllerTest#test_show"
       assert_equal true, recovery_report.dig("publication", "published")
       assert_equal generation + 1, recovery_report.fetch("generation")
     end
@@ -278,8 +276,9 @@ class RailsAcceptanceTest < Minitest::Test
       )
       assert clean.success?, rails_failure("plain stock Rails API probe", clean)
 
-      active = driver.discover(
+      active = driver.run(
         project,
+        full: true,
         env: runtime.env.merge("RAILS_ACCEPTANCE_API_SNAPSHOT" => active_path.to_s)
       )
       assert active.success?, rails_failure("active Rails API probe", active)

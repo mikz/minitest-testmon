@@ -31,8 +31,12 @@ class RailsFixturesTest < TestmonTestCase
         claimed_paths(serial, TEST_ID)
       )
       assert_equal(
-        ["shared:fixtures", "shared:fixtures/widgets.yml"],
+        ["shared:fixtures/widgets.yml"],
         serial.to_h.dig(:inventory, :verified_empty, :items).map { |item| item.fetch(:path) }.sort
+      )
+      assert_equal(
+        ["project:fixtures", "shared:fixtures"],
+        serial.to_h.dig(:inventory, :suite_scoped, :items).map { |item| item.fetch(:path) }.sort
       )
     end
   end
@@ -114,7 +118,7 @@ class RailsFixturesTest < TestmonTestCase
       run_id: WORKER_RUN_ID,
       worker_number: 0,
       context_signature: snapshot.signature,
-      generation: 1
+      base_revision: 1
     )
     worker = snapshot.observe
     worker.attach_spool(spool)
@@ -129,7 +133,7 @@ class RailsFixturesTest < TestmonTestCase
       run_id: WORKER_RUN_ID,
       worker_count: 1,
       context_signature: snapshot.signature,
-      generation: 1
+      base_revision: 1
     )
     assert merged.complete
 

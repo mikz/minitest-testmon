@@ -36,6 +36,7 @@ module Minitest
             "rails.locales": LocalesDefinition.new(configuration),
             "rails.fixtures": FixturesDefinition.new(configuration)
           }
+          definitions[:"rails.assets"] = AssetsDefinition.new(configuration) if defined?(Propshaft::LoadPath)
           definitions.each do |name, implementation|
             next if configuration.providers.any? { |provider| provider.name == name }
             configuration.provider(name, implementation, version: 1)
@@ -43,7 +44,12 @@ module Minitest
           true
         end
 
+        # The file list Rails' TestCommand#all passes to Minitest; the exact
+        # set that still denotes a complete suite for this profile.
+        COMPLETE_SUITE_GLOBS = ["test/**/*_test.rb"].freeze
+
         def prepare_configuration(configuration)
+          configuration.default_complete_suite_globs(*COMPLETE_SUITE_GLOBS)
           configuration.ruby_files("app/**/*.rb", root: :project)
           external_runtime_paths.each { |path| add_gem_root(configuration, path) }
         end
@@ -84,6 +90,52 @@ module Minitest
         def fixture_roots
           return [] unless defined?(ActiveSupport::TestCase) && ActiveSupport::TestCase.respond_to?(:fixture_paths)
           Array(ActiveSupport::TestCase.fixture_paths).map(&:to_s).reject(&:empty?).uniq
+        end
+
+        def asset_roots
+          return [] unless defined?(Rails) && Rails.respond_to?(:application) && Rails.application
+          config = Rails.application.config
+          return [] unless config.respond_to?(:assets) && config.assets.respond_to?(:paths)
+          Array(config.assets.paths).map(&:to_s).reject(&:empty?).uniq
+        rescue NoMethodError
+          []
+        end
+
+        ASSET_INPUT_FILES = %w[
+          config/importmap.rb
+          package.json
+          package-lock.json
+          yarn.lock
+          pnpm-lock.yaml
+          bun.lock
+          bun.lockb
+          postcss.config.js
+          postcss.config.mjs
+          tailwind.config.js
+          tailwind.config.ts
+        ].freeze
+        ASSET_INPUT_DIRECTORIES = %w[app/javascript vendor/javascript].freeze
+
+        def asset_input_files(configuration)
+          ASSET_INPUT_FILES
+            .map { |path| File.join(configuration.project_root, path) }
+            .select { |path| File.file?(path) }
+        end
+
+        def asset_input_directories(configuration)
+          ASSET_INPUT_DIRECTORIES
+            .map { |path| File.join(configuration.project_root, path) }
+            .select { |path| File.directory?(path) }
+        end
+
+        def asset_detail(observation)
+          fixture_detail(observation, :logical_path).to_s
+        end
+
+        def asset_content_keys(observation, facet)
+          logical = asset_detail(observation)
+          return [] if logical.empty?
+          facet.artifact_keys.select { |key| key.end_with?("/#{logical}") }
         end
 
         def add_gem_root(configuration, path)
@@ -263,6 +315,72 @@ module Minitest
                 to: [inventory, content],
                 using: ->(_observation, facet) { facet.artifact_keys }
               builder.claim :rails_locale, to: [inventory, membership]
+            end
+          end
+        end
+
+        # Assets are runtime inputs of any test that resolves an asset URL —
+        # system tests through Capybara page loads and Propshaft::Server, but
+        # equally controller/integration tests rendering stylesheet_link_tag.
+        # Every resolution funnels through Propshaft::LoadPath#find with the
+        # logical path, so served/linked asset content is claimed per test.
+        # Build inputs (importmap, package manifests, lockfiles, bundler
+        # configs, app/javascript sources) cannot be tied to a single logical
+        # path; any asset-resolving test conservatively claims them all, the
+        # same way locale lookups claim every locale file.
+        class AssetsDefinition
+          def initialize(configuration)
+            @asset_specs = Rails81.inventory_specs(configuration, Rails81.asset_roots, prefix: :assets)
+            @input_specs = Rails81.inventory_specs(
+              configuration, Rails81.asset_input_directories(configuration), prefix: :asset_input_trees
+            )
+            @input_specs += Rails81.inventory_specs(
+              configuration, Rails81.asset_input_files(configuration), prefix: :asset_input_files, files: true
+            )
+          end
+
+          def define(builder)
+            asset_targets = declare(builder, @asset_specs, label: nil)
+            input_targets = declare(builder, @input_specs, label: :inputs)
+            return if asset_targets.empty? && input_targets.empty?
+
+            builder.observe_tracepoint :rails_asset,
+              target: [Propshaft::LoadPath, :find],
+              event: :call,
+              path: ->(_trace) {},
+              details: ->(trace) { {"logical_path" => trace.local(:asset_name).to_s} }
+            builder.ignore :rails_asset,
+              reason: "asset lookup without a logical path",
+              predicate: ->(observation) { Rails81.asset_detail(observation).empty? }
+
+            asset_targets.each do |inventory, content, membership|
+              builder.claim :rails_asset,
+                to: [inventory, content],
+                using: Rails81.method(:asset_content_keys)
+              builder.claim :rails_asset, to: [inventory, membership]
+            end
+            input_targets.each do |inventory, content, membership|
+              builder.claim :rails_asset,
+                to: [inventory, content],
+                using: ->(_observation, facet) { facet.artifact_keys }
+              builder.claim :rails_asset, to: [inventory, membership]
+            end
+          end
+
+          private
+
+          def declare(builder, specs, label:)
+            specs.each_with_index.map do |spec, index|
+              suffix = [label, index.zero? ? nil : index].compact.join("_")
+              content = suffix.empty? ? :content : :"content_#{suffix}"
+              membership = suffix.empty? ? :membership : :"membership_#{suffix}"
+              builder.inventory spec.fetch(:name),
+                root: spec.fetch(:root), base: spec.fetch(:base), include: spec.fetch(:include), exclude: []
+              builder.facet content,
+                inventory: spec.fetch(:name), digest: :content, granularity: :file, scope: :test
+              builder.facet membership,
+                inventory: spec.fetch(:name), digest: :paths, granularity: :set, scope: :test
+              [spec.fetch(:name), content, membership]
             end
           end
         end

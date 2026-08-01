@@ -12,12 +12,11 @@ module Minitest
       ].freeze
 
       attr_reader :generation, :context_signature, :observations, :artifacts, :dependencies,
-        :diagnostics, :observation_claims, :mode, :bundles, :publication, :resolver,
-        :selection_mode
+        :diagnostics, :observation_claims, :mode, :bundles, :publication, :resolver
 
       def initialize(
         context_signature:, generation: nil,
-        mode: :discover,
+        mode: :run,
         bundles: [],
         tests: {},
         observations: [],
@@ -27,13 +26,11 @@ module Minitest
         diagnostics: [],
         complete: true,
         publication: {published: false, reason: "not_published"},
-        resolver: nil,
-        selection_mode: nil
+        resolver: nil
       )
         @generation = generation
         @context_signature = context_signature
         @mode = mode.to_s
-        @selection_mode = selection_mode&.to_sym
         @bundles = Array(bundles).map(&:to_s).sort.freeze
         @tests = {
           discovered: Array(tests[:discovered]).map(&:to_s).uniq.sort,
@@ -81,21 +78,8 @@ module Minitest
         @tests.fetch(:executed)
       end
 
-      def full_run?
-        mode == "discover" || selection_mode == :full
-      end
-
       def with_generation(generation)
         copy(generation: generation)
-      end
-
-      def certified(generation)
-        copy(generation: generation, publication: {published: true, reason: nil})
-      end
-
-      def without_test_dependencies(test_ids)
-        excluded = Array(test_ids).map(&:to_s).to_h { |test_id| [test_id, true] }
-        copy(dependencies: dependencies.reject { |dependency| excluded.key?(dependency.test_id) })
       end
 
       def unpublished(reason)
@@ -108,7 +92,9 @@ module Minitest
         {
           schema_version: SCHEMA_VERSION,
           mode: mode,
+          complete: complete?,
           ready: ready?,
+          diagnostics: diagnostics,
           generation: generation,
           context_signature: context_signature,
           bundles: bundles,
@@ -140,8 +126,7 @@ module Minitest
           diagnostics: diagnostics,
           complete: complete?,
           publication: overrides.fetch(:publication, publication),
-          resolver: resolver,
-          selection_mode: selection_mode
+          resolver: resolver
         )
       end
 
@@ -164,8 +149,8 @@ module Minitest
 
       def categorize_inventory
         result = {claimed: [], suite_scoped: [], verified_empty: [], unresolved: []}
-        suite_keys = dependencies.select { |dependency| dependency.complete && dependency.test_id == "*" }
-          .to_h { |dependency| [dependency.artifact_key, true] }
+        suite_keys = artifacts.select { |artifact| artifact.scope == :suite }
+          .to_h { |artifact| [artifact.key, true] }
         claimed_keys = dependencies.select { |dependency| dependency.complete && dependency.test_id != "*" }
           .to_h { |dependency| [dependency.artifact_key, true] }
         artifacts.each do |artifact|

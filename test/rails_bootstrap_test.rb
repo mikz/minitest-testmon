@@ -92,6 +92,10 @@ class RailsBootstrapTest < TestmonTestCase
             def self.config
               @config ||= RailtieConfiguration.new
             end
+
+            def self.initializer(name, &block)
+              (@initializers ||= []) << [name, block]
+            end
           end
 
           module Command
@@ -185,6 +189,10 @@ class RailsBootstrapTest < TestmonTestCase
             def self.config
               @config ||= RailtieConfiguration.new
             end
+
+            def self.initializer(name, &block)
+              (@initializers ||= []) << [name, block]
+            end
           end
 
           module Command
@@ -259,6 +267,10 @@ class RailsBootstrapTest < TestmonTestCase
             class Railtie
               def self.config
                 @config ||= RailtieConfiguration.new
+              end
+
+              def self.initializer(name, &block)
+                (@initializers ||= []) << [name, block]
               end
             end
 
@@ -498,7 +510,7 @@ class RailsBootstrapTest < TestmonTestCase
         assert_early_usage_rejection(
           project,
           arguments,
-          /--testmon requires the complete default Rails test suite/,
+          /--testmon requires a complete Rails test suite \(bin\/rails test or bin\/rails test:all\)/,
           test_command: test_command,
           rake_test_prepare: rake_test_prepare
         )
@@ -545,7 +557,7 @@ class RailsBootstrapTest < TestmonTestCase
       assert_equal 0, warm.exitstatus, stderr
       warm_report = read_report(project)
       assert_empty warm_report.dig("tests", "executed")
-      assert_equal cold_report.fetch("inventory"), warm_report.fetch("inventory")
+      assert_equal inventory_fingerprints(cold_report), inventory_fingerprints(warm_report)
     end
 
     with_project do |project|
@@ -647,7 +659,7 @@ class RailsBootstrapTest < TestmonTestCase
 
       assert_equal 2, status.exitstatus
       assert_empty stdout
-      assert_match(/fileset scope must be :test or :suite/, stderr)
+      assert_match(/filesets are always suite-scoped/, stderr)
       refute_match(/\n\\s+from /, stderr)
       refute File.exist?(File.join(project, ".minitest-testmon.sqlite3"))
       refute File.exist?(File.join(project, "tmp/minitest-testmon/discovery.json"))
@@ -755,6 +767,13 @@ class RailsBootstrapTest < TestmonTestCase
   end
 
   def invoke_direct_testmon(project, test_body)
+    test_file = write_file(File.join(project, "test/direct_testmon_case_test.rb"), <<~RUBY)
+      class DirectTestmonCase < Minitest::Test
+        def test_result
+          #{test_body}
+        end
+      end
+    RUBY
     script = <<~RUBY
       require "minitest/testmon/rails_bootstrap"
 
@@ -766,12 +785,7 @@ class RailsBootstrapTest < TestmonTestCase
       )
       ARGV.replace(["--testmon"])
       require "minitest/autorun"
-
-      class DirectTestmonCase < Minitest::Test
-        def test_result
-          #{test_body}
-        end
-      end
+      require #{test_file.inspect}
     RUBY
     invoke_bootstrap(project, script)
   end
@@ -781,5 +795,10 @@ class RailsBootstrapTest < TestmonTestCase
     report = store.report
     store.close
     report
+  end
+
+  def inventory_fingerprints(report)
+    report.fetch("inventory").values.flat_map { |category| category.fetch("items") }
+      .to_h { |item| [item.fetch("key"), item.fetch("fingerprint")] }
   end
 end

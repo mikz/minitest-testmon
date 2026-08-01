@@ -1,5 +1,4 @@
 # frozen_string_literal: true
 
-# Top-level executable code has no method identity. The ISeq provider must
-# conservatively fingerprint the whole file instead of dropping the edge.
+# Top-level executable code is still attributed to its exact-byte source input.
 TOP_LEVEL_FALLBACK_VALUE = 10

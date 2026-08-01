@@ -64,16 +64,21 @@ module RailsCliProductAcceptance
   end
 
   def assert_certified_inventory(cold, warm, cli)
-    cold_inventory = cold.fetch("inventory")
-    warm_inventory = warm.fetch("inventory")
-    persisted_inventory = cli.published_inventory
+    cold_inventory = inventory_fingerprints(cold.fetch("inventory"))
+    warm_inventory = inventory_fingerprints(warm.fetch("inventory"))
+    persisted_inventory = inventory_fingerprints(cli.published_inventory)
 
     assert cold_inventory == warm_inventory,
-      "certified warm report exposed run-local inventory instead of its cold published graph"
+      "warm run changed literal inventory fingerprints"
     assert cold_inventory == persisted_inventory,
-      "cold report inventory differs from the persisted published graph"
+      "cold report inventory differs from the persisted accepted report"
     assert warm_inventory == persisted_inventory,
-      "certified warm report inventory differs from the persisted published graph"
+      "warm report inventory differs from the persisted accepted report"
+  end
+
+  def inventory_fingerprints(inventory)
+    inventory.values.flat_map { |category| category.fetch("items") }
+      .to_h { |item| [item.fetch("key"), item.fetch("fingerprint")] }
   end
 
   def assert_configuration_rejected_before_evidence(result, error_class:, project:, cli:, marker:)

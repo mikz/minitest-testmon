@@ -124,7 +124,7 @@ class RailsCliAcceptanceTest < Minitest::Test
 
   def test_wrapper_discover_and_run_activate_the_stock_rails_command_from_environment
     with_rails_cli_project do |_project, runtime, cli|
-      discovered = cli.wrapped(env: runtime.env, mode: "discover")
+      discovered = cli.wrapped(env: runtime.env, full: true)
       assert_equal 0, discovered.exitstatus, cli_failure("wrapped Rails discovery", discovered)
       cold = cli.report
       assert_report_contract cold
@@ -153,7 +153,7 @@ class RailsCliAcceptanceTest < Minitest::Test
 
       discovered = cli.wrapped(
         env: runtime.env,
-        mode: "discover",
+        full: true,
         explicit_paths: false,
         chdir: outside
       )
@@ -188,7 +188,7 @@ class RailsCliAcceptanceTest < Minitest::Test
 
   def test_wrapper_rejects_default_test_filters_without_publication_or_state_changes
     with_rails_cli_project do |project, runtime, cli|
-      discovered = cli.wrapped(env: runtime.env, mode: "discover")
+      discovered = cli.wrapped(env: runtime.env, full: true)
       assert_equal 0, discovered.exitstatus, cli_failure("wrapper filter baseline", discovered)
       baseline_report = cli.report
       assert_report_contract baseline_report
@@ -398,7 +398,7 @@ class RailsCliAcceptanceTest < Minitest::Test
 
       [
         ["direct", ->(env) { cli.flagged(env:) }],
-        ["wrapper", ->(env) { cli.wrapped(env:, mode: "discover") }]
+        ["wrapper", ->(env) { cli.wrapped(env:, full: true) }]
       ].each do |label, invoke|
         marker = project.path.join("tmp/#{label}-root-replacement-marker")
         env = runtime.env.merge(
@@ -573,7 +573,7 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_externally_interrupted_worker_does_not_publish_and_full_run_recovers
+  def test_externally_interrupted_worker_does_not_publish_and_retries_its_dirty_test
     with_rails_cli_project(workers: 2) do |project, runtime, cli|
       baseline = learn_cli_baseline(project, runtime, cli)
       replace_cli_fixture(project, "app/views/greetings/_message.html.erb", "template v1", "template v2")
@@ -600,8 +600,8 @@ class RailsCliAcceptanceTest < Minitest::Test
         extra_env: {"EXPECTED_TEMPLATE" => "Hello from template v2"}
       )
       assert_equal 0, recovered.exitstatus, cli_failure("worker recovery", recovered)
-      assert_equal recovery_report.dig("tests", "discovered"), recovery_report.dig("tests", "selected")
-      assert_equal recovery_report.dig("tests", "discovered"), recovery_report.dig("tests", "executed")
+      assert_equal ["GreetingsControllerTest#test_show"], recovery_report.dig("tests", "selected")
+      assert_equal ["GreetingsControllerTest#test_show"], recovery_report.dig("tests", "executed")
       assert_equal baseline.fetch("generation") + 1, recovery_report.fetch("generation")
     end
   end
@@ -630,13 +630,8 @@ class RailsCliAcceptanceTest < Minitest::Test
       )
       assert_equal 4, contender.exitstatus, cli_failure("lease contender", contender)
       refute marker.exist?, "lease contender reached a test body"
-      assert_cli_oracle do
-        MinitestTestmonAcceptance::RailsCliOracle.assert_retained_generation!(
-          baseline,
-          rejected,
-          reason: "cache_lease_unavailable"
-        )
-      end
+      assert_equal baseline, rejected,
+        "lease contention should leave the last completed report untouched"
 
       release.dirname.mkpath
       release.write("release")
@@ -756,7 +751,7 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_newly_skipped_dependency_test_rejects_then_forces_full_recovery
+  def test_newly_skipped_dependency_test_publishes_passing_tests_and_retries_the_skip
     with_rails_cli_project do |project, runtime, cli|
       baseline = learn_cli_baseline(project, runtime, cli)
       replace_cli_fixture(project, "config/policies/rules.yml", "mode: v1", "mode: v2")
@@ -769,14 +764,11 @@ class RailsCliAcceptanceTest < Minitest::Test
           "RAILS_ACCEPTANCE_SKIP_POLICY_TEST" => "1"
         }
       )
-      assert_equal 4, rejected_result.exitstatus, cli_failure("new skip rejection", rejected_result)
-      assert_cli_oracle do
-        MinitestTestmonAcceptance::RailsCliOracle.assert_retained_generation!(
-          baseline,
-          rejected,
-          reason: "test_skip"
-        )
-      end
+      assert_equal 0, rejected_result.exitstatus, cli_failure("new skip run", rejected_result)
+      assert_equal true, rejected.dig("publication", "published")
+      assert_equal baseline.fetch("generation") + 1, rejected.fetch("generation")
+      assert_includes rejected.dig("tests", "selected"), "CustomProviderTest#test_tracepoint_policy_loader"
+      assert_includes rejected.dig("tests", "executed"), "CustomProviderTest#test_tracepoint_policy_loader"
 
       recovered, recovery = run_cli(
         runtime,
@@ -784,9 +776,9 @@ class RailsCliAcceptanceTest < Minitest::Test
         extra_env: {"EXPECTED_POLICY_MODE" => "v2"}
       )
       assert_equal 0, recovered.exitstatus, cli_failure("new skip recovery", recovered)
-      assert_equal recovery.dig("tests", "discovered"), recovery.dig("tests", "selected")
-      assert_equal recovery.dig("tests", "discovered"), recovery.dig("tests", "executed")
-      assert_equal baseline.fetch("generation") + 1, recovery.fetch("generation")
+      assert_equal ["CustomProviderTest#test_tracepoint_policy_loader"], recovery.dig("tests", "selected")
+      assert_equal ["CustomProviderTest#test_tracepoint_policy_loader"], recovery.dig("tests", "executed")
+      assert_equal baseline.fetch("generation") + 2, recovery.fetch("generation")
     end
   end
 

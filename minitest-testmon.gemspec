@@ -22,9 +22,14 @@ Gem::Specification.new do |spec|
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
   spec.metadata["rubygems_mfa_required"] = "true"
 
-  spec.files = IO.popen(%w[git ls-files -z], chdir: __dir__, err: IO::NULL) do |files|
+  spec.files = IO.popen(
+    %w[git ls-files --cached --others --exclude-standard -z],
+    chdir: __dir__,
+    err: IO::NULL
+  ) do |files|
     files.readlines("\x0", chomp: true).select do |file|
-      file.match?(%r{\A(?:CHANGELOG\.md|LICENSE\.txt|README\.md|docs/|exe/|lib/)})
+      File.file?(File.join(__dir__, file)) &&
+        file.match?(%r{\A(?:CHANGELOG\.md|LICENSE\.txt|README\.md|docs/|exe/|lib/)})
     end
   end
   spec.bindir = "exe"
@@ -32,6 +37,5 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "minitest", ">= 6.0", "< 7"
-  spec.add_dependency "prism", ">= 1.9", "< 2"
   spec.add_dependency "sqlite3", ">= 2.0", "< 3"
 end

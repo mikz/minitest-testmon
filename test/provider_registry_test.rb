@@ -3,6 +3,54 @@
 require_relative "test_helper"
 
 class ProviderRegistryTest < TestmonTestCase
+  def test_snapshot_exposes_deterministic_inputs_with_context_and_exact_byte_ruby_digest
+    with_project do |project|
+      ruby_path = write_file(File.join(project, "lib", "account.rb"), "class Account; end\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+
+      assert snapshot.current_inputs.frozen?
+      assert_equal snapshot.current_inputs.sort_by { |input| input.id.to_s }, snapshot.current_inputs
+      assert_equal snapshot.current_inputs, snapshot.current_inputs_by_id.values.sort_by { |input| input.id.to_s }
+      context = snapshot.current_inputs.find { |input| input.key == "$context" }
+      assert_equal :suite, context.scope
+      ruby_input = snapshot.current_inputs.find do |input|
+        input.relative_path == "lib/account.rb" && input.facet == "ruby_source"
+      end
+      assert_equal Digest::SHA256.file(ruby_path).hexdigest, ruby_input.fingerprint.digest
+    end
+  end
+
+  def test_test_definition_is_an_ordinary_claimed_input
+    with_project do |project|
+      source = write_file(File.join(project, "test", "generated_definition_test.rb"), <<~RUBY)
+        class GeneratedDefinitionTest < Minitest::Test
+          def test_generated
+            assert true
+          end
+        end
+      RUBY
+      load source
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      test_id = "GeneratedDefinitionTest#test_generated"
+      definition = snapshot.test_definition_input(test_id)
+
+      assert_equal "test/generated_definition_test.rb", definition.relative_path
+      assert_equal Digest::SHA256.file(source).hexdigest, definition.fingerprint.digest
+
+      session = snapshot.observe
+      session.test_started(GeneratedDefinitionTest.new("test_generated"))
+      session.finalize
+      assert_includes session.claimed_input_ids(test_id), definition.id
+      assert session.claimed_input_ids_by_test.frozen?
+    ensure
+      Object.send(:remove_const, :GeneratedDefinitionTest) if Object.const_defined?(:GeneratedDefinitionTest, false)
+    end
+  end
+
   def test_low_level_provider_registration_is_not_a_public_surface
     refute Minitest::Testmon.respond_to?(:register_provider)
     registry = Minitest::Testmon::ProviderRegistry.new
@@ -37,7 +85,11 @@ class ProviderRegistryTest < TestmonTestCase
       assert report.complete?
       assert_equal 2, report.dependencies.count { |item| item.test_id == "InvoiceTest#test_total" }
       assert report.artifacts.all? { |item| item.provider == :"templates@1" }
-      assert report.artifacts.all? { |item| item.test_ids == ["InvoiceTest#test_total"] }
+      content = report.artifacts.find { |item| item.facet == "content" }
+      membership = report.artifacts.find { |item| item.facet == "membership" }
+      assert_equal ["InvoiceTest#test_total"], content.test_ids
+      assert_equal :suite, membership.scope
+      assert_empty membership.test_ids
       assert(report.to_h.dig(:inventory, :claimed, :items).all? do |item|
         item.fetch(:test_ids) == ["InvoiceTest#test_total"]
       end)
@@ -103,6 +155,83 @@ class ProviderRegistryTest < TestmonTestCase
         report.dependencies.map { |dependency| [dependency.test_id, dependency.artifact_key] },
         ["*", artifact.key]
       )
+      assert_equal :suite, session.current_inputs.find { |input| input.id == artifact.to_input.id }.scope
+    end
+  end
+
+  def test_suite_observation_cannot_widen_a_test_scoped_input
+    with_project do |project|
+      path = write_file(File.join(project, "config", "application.yml"), "value: one\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :boot, version: 1 do
+        inventory :config, root: :project, include: "config/**/*.yml"
+        facet :content, inventory: :config, digest: :content, granularity: :file
+        claim :config_read, to: %i[config content], path: :path
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      session.record(Minitest::Testmon::Observation.build(
+        kind: :config_read,
+        path: path,
+        scope: :suite
+      ))
+
+      report = session.finalize
+      input = session.current_inputs.find { |item| item.relative_path == "config/application.yml" && item.facet == "content" }
+
+      refute report.complete?
+      assert_includes report.diagnostics, "ambiguous_context"
+      assert_equal :test, input.scope
+    end
+  end
+
+  def test_late_activation_is_rejected_instead_of_publishing_an_unpersisted_suite_input
+    with_project do |project|
+      path = write_file(File.join(project, "config", "application.yml"), "value: one\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :boot, version: 1 do
+        inventory :config, root: :project, include: "config/**/*.yml"
+        facet :content, inventory: :config, digest: :content, granularity: :file
+        claim :config_read, to: %i[config content], path: :path
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      session.record(Minitest::Testmon::Observation.build(
+        kind: :config_read,
+        path: path,
+        reason: :late_activation
+      ))
+
+      report = session.finalize
+
+      refute report.complete?
+      assert_includes report.diagnostics, "late_activation"
+    end
+  end
+
+  def test_ignore_cannot_clear_a_late_activation_failure
+    with_project do |project|
+      path = write_file(File.join(project, "config", "application.yml"), "value: one\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :boot, version: 1 do
+        inventory :config, root: :project, include: "config/**/*.yml"
+        facet :content, inventory: :config, digest: :content, granularity: :file
+        claim :config_read, to: %i[config content], path: :path
+        ignore :config_read, reason: "normally ignored", predicate: ->(_observation) { true }
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      session.record(Minitest::Testmon::Observation.build(
+        kind: :config_read,
+        path: path,
+        reason: :late_activation
+      ))
+
+      report = session.finalize
+
+      refute report.complete?
+      assert_includes report.diagnostics, "late_activation"
+      assert_equal :user_ignored, report.observations.fetch(0).reason
     end
   end
 
@@ -187,11 +316,12 @@ class ProviderRegistryTest < TestmonTestCase
       report = session.finalize
 
       assert report.complete?
-      assert_equal 2, report.artifacts.length
-      assert_equal 1, report.artifacts.map(&:key).uniq.length
-      assert_match(%r{\Aphysical/content/project:shared/input\.txt\z}, report.artifacts.first.key)
-      assert_equal %w[alpha@1 beta@1], report.dependencies.map { |item| item.provider.to_s }.uniq.sort
-      assert_equal [report.artifacts.first.key], report.dependencies.map(&:artifact_key).uniq
+      content = report.artifacts.select { |item| item.facet == "content" }
+      assert_equal 2, content.length
+      assert_equal 1, content.map(&:key).uniq.length
+      assert_match(%r{\Aphysical/content/project:shared/input\.txt\z}, content.first.key)
+      content_dependencies = report.dependencies.select { |item| item.artifact_key == content.first.key }
+      assert_equal %w[alpha@1 beta@1], content_dependencies.map { |item| item.provider.to_s }.uniq.sort
     end
   end
 end

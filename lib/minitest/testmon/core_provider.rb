@@ -36,15 +36,15 @@ module Minitest
         facets = []
         @configuration.ruby_patterns.group_by(&:first).sort_by { |root, _| root.to_s }.each do |root, entries|
           inventory_name = :"ruby_#{root}"
-          iseq_name = :"ruby_#{root}_iseq"
+          source_name = :"ruby_#{root}_source"
           paths_name = :"ruby_#{root}_paths"
           builder.inventory inventory_name,
             root: root,
             include: (entries.map(&:last) + ((root.to_sym == :project) ? ["**/*.rb"] : [])).uniq.sort,
             exclude: inventory_excludes(root)
-          builder.facet iseq_name,
+          builder.facet source_name,
             inventory: inventory_name,
-            digest: :ruby_iseq,
+            digest: :ruby_source,
             granularity: :file,
             scope: :test
           builder.facet paths_name,
@@ -52,7 +52,7 @@ module Minitest
             digest: :paths,
             granularity: :set,
             scope: :suite
-          facets << [inventory_name, iseq_name]
+          facets << [inventory_name, source_name]
         end
 
         if @configuration.roots.key?(:project)
@@ -62,9 +62,20 @@ module Minitest
             exclude: EXCLUDES
           builder.facet :test_definitions,
             inventory: :test_definitions,
-            digest: :contents,
-            granularity: :set,
-            scope: :suite
+            digest: :content,
+            granularity: :file,
+            scope: :test
+          builder.__send__(
+            :__observe_builtin_test_start,
+            :test_definition,
+            details: ->(test) {
+              location = test.__send__(:__source_location)
+              {"path" => location.first} if location&.first
+            }
+          )
+          builder.claim :test_definition,
+            to: %i[test_definitions test_definitions],
+            path: ->(observation) { observation.details["path"] || observation.details[:path] }
         end
         facets
       end
@@ -74,6 +85,9 @@ module Minitest
           builder.claim :coverage_lines, to: target, path: :path
           builder.claim :ruby_script, to: target, path: :path
           builder.claim :ruby_require, to: target, path: :path
+          builder.claim :test_definition,
+            to: target,
+            path: ->(observation) { observation.details["path"] || observation.details[:path] }
         end
       end
 

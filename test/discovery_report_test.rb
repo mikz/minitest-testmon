@@ -35,8 +35,10 @@ class DiscoveryReportTest < TestmonTestCase
       observation_claims: {observation.key => [artifact.key]}
     ).published(4)
 
-    expected_keys = %i[schema_version mode ready generation context_signature bundles tests observations inventory suggestions publication]
+    expected_keys = %i[schema_version mode complete ready diagnostics generation context_signature bundles tests observations inventory suggestions publication]
     assert_equal expected_keys.sort, report.to_h.keys.sort
+    assert_equal true, report.to_h.fetch(:complete)
+    assert_empty report.to_h.fetch(:diagnostics)
     assert_equal %i[claimed ignored uncovered unresolved], report.to_h[:observations].keys
     assert_equal %i[claimed suite_scoped verified_empty unresolved], report.to_h[:inventory].keys
     assert_equal "artifact-key", report.to_h.dig(:observations, :claimed, :items, 0, :key)
@@ -44,6 +46,16 @@ class DiscoveryReportTest < TestmonTestCase
     assert_equal({path: "project:test/example_test.rb", line: 7, owner: "ExampleTest"}, report.to_h.dig(:observations, :claimed, :items, 0, :callsite))
     assert report.ready?
     assert_equal report.to_json, report.to_json
+  end
+
+  def test_incompleteness_and_diagnostics_are_exposed
+    report = Minitest::Testmon::DiscoveryReport.new(
+      context_signature: "context",
+      diagnostics: %i[source_drift late_activation source_drift]
+    )
+
+    assert_equal false, report.to_h.fetch(:complete)
+    assert_equal %w[late_activation source_drift], report.to_h.fetch(:diagnostics)
   end
 
   def test_suite_dependency_is_reported_only_as_suite_scoped

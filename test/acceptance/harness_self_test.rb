@@ -71,14 +71,35 @@ class HarnessSelfTest < Minitest::Test
     assert_match "uncovered_file", error.message
   end
 
+  def test_contract_rejects_inconsistent_completeness_fields
+    report = minimal_report.merge(
+      "complete" => true,
+      "diagnostics" => ["source_drift"]
+    )
+    error = assert_raises(MinitestTestmonAcceptance::ReportContract::Violation) do
+      MinitestTestmonAcceptance::ReportContract.validate!(report)
+    end
+    assert_match "cannot contain diagnostics", error.message
+
+    report = minimal_report.merge("ready" => true)
+    error = assert_raises(MinitestTestmonAcceptance::ReportContract::Violation) do
+      MinitestTestmonAcceptance::ReportContract.validate!(report)
+    end
+    assert_match "ready must equal", error.message
+
+    assert MinitestTestmonAcceptance::ReportContract.validate!(minimal_report)
+  end
+
   private
 
   def minimal_report
     categories = ->(keys) { keys.to_h { |key| [key, {"count" => 0, "items" => []}] } }
     {
       "schema_version" => 2,
-      "mode" => "discover",
+      "mode" => "run",
+      "complete" => false,
       "ready" => false,
+      "diagnostics" => [],
       "generation" => nil,
       "context_signature" => "context",
       "bundles" => [],

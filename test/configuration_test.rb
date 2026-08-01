@@ -126,8 +126,64 @@ class ConfigurationTest < TestmonTestCase
 
       provider = configuration.providers.fetch(0)
       assert_equal "fileset.templates@1", provider.id
-      assert_equal :contents, provider.facets.fetch(0).digest
-      assert_equal :set, provider.facets.fetch(0).granularity
+      contents = provider.facets.find { |facet| facet.digest == :contents }
+      assert_equal :set, contents.granularity
+      membership = provider.facets.find { |facet| facet.digest == :paths }
+      assert_equal :suite, membership.scope
+      assert_equal :suite, contents.scope
+      error = assert_raises(Minitest::Testmon::ConfigurationError) do
+        Minitest::Testmon::Configuration.new(cwd: project).fileset(
+          :unsafe,
+          include: "templates/**/*.txt",
+          scope: :test
+        )
+      end
+      assert_match(/always suite-scoped/, error.message)
+    end
+  end
+
+  def test_every_inventory_gets_exactly_one_suite_membership_by_default
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      definition = configuration.provider :documents, version: 1 do
+        inventory :documents, root: :project, include: "documents/**/*.txt"
+        facet :content, inventory: :documents, digest: :content, granularity: :file
+      end
+
+      memberships = definition.facets.select { |facet| facet.digest == :paths && facet.granularity == :set }
+      assert_equal 1, memberships.length
+      assert_equal :documents, memberships.first.inventory
+      assert_equal :suite, memberships.first.scope
+    end
+  end
+
+  def test_membership_remains_suite_scoped_even_with_a_static_claim
+    with_project do |project|
+      unobserved = Minitest::Testmon::Configuration.new(cwd: project).provider :unobserved, version: 1 do
+        inventory :documents, root: :project, include: "documents/**/*.txt"
+        facet :membership, inventory: :documents, digest: :paths, granularity: :set, scope: :test
+      end
+      assert_equal :suite, unobserved.facets.find { |facet| facet.digest == :paths }.scope
+
+      observed = Minitest::Testmon::Configuration.new(cwd: project).provider :observed, version: 1 do
+        inventory :documents, root: :project, include: "documents/**/*.txt"
+        facet :membership, inventory: :documents, digest: :paths, granularity: :set, scope: :test
+        claim :document_lookup, to: %i[documents membership]
+      end
+      assert_equal :suite, observed.facets.find { |facet| facet.digest == :paths }.scope
+    end
+  end
+
+  def test_multiple_memberships_for_one_inventory_are_rejected
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      assert_raises(Minitest::Testmon::ConfigurationError) do
+        configuration.provider :documents, version: 1 do
+          inventory :documents, root: :project, include: "documents/**/*.txt"
+          facet :membership, inventory: :documents, digest: :paths, granularity: :set
+          facet :also_membership, inventory: :documents, digest: :paths, granularity: :set
+        end
+      end
     end
   end
 

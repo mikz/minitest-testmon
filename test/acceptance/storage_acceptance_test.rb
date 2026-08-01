@@ -53,7 +53,7 @@ class StorageAcceptanceTest < Minitest::Test
       assert_equal report.dig("tests", "discovered"), report.dig("tests", "selected")
       assert_equal report.dig("tests", "discovered"), report.dig("tests", "executed")
       assert_equal true, report.dig("publication", "published")
-      assert_equal "cache_corrupt_rebuilt", report.dig("publication", "reason")
+      assert_nil report.dig("publication", "reason")
 
       quarantined = Dir[project.path.join(".minitest-testmon.sqlite3.corrupt-*-*")]
       assert_equal 1, quarantined.length,
@@ -91,12 +91,9 @@ class StorageAcceptanceTest < Minitest::Test
         wait_until("first runner did not enter lease barrier") { ready.file? }
         loser = driver.run(project)
         refute loser.success?, "concurrent lease loser waited or exited zero"
-        loser_report = driver.report(project)
-        assert_report_contract loser_report
-        assert_equal false, loser_report.dig("publication", "published")
-        assert_equal "cache_lease_unavailable", loser_report.dig("publication", "reason")
-        assert_empty loser_report.dig("tests", "executed")
-        assert_equal generation, loser_report.fetch("generation")
+        assert_includes loser.stderr, "cache_lease_unavailable"
+        assert_equal baseline, driver.report(project),
+          "lease loser replaced the last completed receipt"
 
         release.write("release")
         _, first_status = Process.wait2(first_pid)
@@ -121,7 +118,6 @@ class StorageAcceptanceTest < Minitest::Test
       owner_pid = nil
       begin
         baseline = learn_baseline(project)
-        generation = baseline.fetch("generation")
         project.write("lib/subject.rb", project.read("lib/subject.rb").sub("1 + 1", "2 + 0"))
         ready = project.path.join("tmp/busy-owner-ready")
         release = project.path.join("tmp/busy-owner-release")
@@ -145,12 +141,8 @@ class StorageAcceptanceTest < Minitest::Test
         busy = driver.run(project)
         refute busy.success?, "second runner waited for or stole the active SQLite owner"
         assert_includes busy.stderr, "cache_lease_unavailable"
-        busy_report = driver.report(project)
-        assert_report_contract busy_report
-        assert_equal false, busy_report.dig("publication", "published")
-        assert_equal "cache_lease_unavailable", busy_report.dig("publication", "reason")
-        assert_equal generation, busy_report.fetch("generation")
-        assert_empty busy_report.dig("tests", "executed")
+        assert_equal baseline, driver.report(project),
+          "busy runner replaced the last completed receipt"
         assert_equal before_quarantine,
           Dir[project.path.join(".minitest-testmon.sqlite3.corrupt-*-*")],
           "ordinary SQLite busy state was mislabeled and quarantined as corruption"

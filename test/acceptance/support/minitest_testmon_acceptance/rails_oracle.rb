@@ -3,7 +3,7 @@
 module MinitestTestmonAcceptance
   class RailsOracle
     BUNDLES = %w[
-      rails.boot@1 rails.fixtures@1 rails.locales@1 rails.schema@1 rails.views@1
+      rails.assets@1 rails.boot@1 rails.fixtures@1 rails.locales@1 rails.schema@1 rails.views@1
     ].freeze
 
     class Mismatch < StandardError; end

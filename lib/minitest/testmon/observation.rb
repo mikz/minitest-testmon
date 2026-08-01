@@ -56,12 +56,11 @@ module Minitest
     end
 
     Observation::UNRESOLVED_REASONS = %i[
-      nonexistent outside_root excluded non_regular temporary opaque_c_call
+      nonexistent outside_root non_regular opaque_c_call
       source_race ambiguous_context late_activation provider_incomplete
-      unsupported_iseq worker_incomplete registry_drift
-      invalid_configuration context_changed uncovered_file uncovered_event
+      worker_incomplete invalid_configuration uncovered_file uncovered_event
       observer_unavailable observer_error extractor_error noncanonical_observation
-      claim_path_missing claim_ambiguous
+      claim_path_missing
     ].freeze
   end
 end

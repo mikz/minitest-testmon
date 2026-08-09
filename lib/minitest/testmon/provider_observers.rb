@@ -266,8 +266,8 @@ module Minitest
         return false unless trace.method_id == @method_name
         receiver = trace.self
         defined_class = trace.defined_class
-        return true if receiver.equal?(@owner) || defined_class.equal?(@owner)
-        return true if @owner.is_a?(Module) && defined_class.equal?(@owner.singleton_class)
+        return true if ObjectIdentity.equal?(receiver, @owner) || ObjectIdentity.equal?(defined_class, @owner)
+        return true if @owner.is_a?(Module) && ObjectIdentity.equal?(defined_class, @owner.singleton_class)
         return true if @owner.is_a?(Module) && @owner === receiver
         defined_class.is_a?(Module) && @owner.is_a?(Module) && !!(defined_class <= @owner)
       rescue TypeError
@@ -276,7 +276,7 @@ module Minitest
 
       def opaque_file_call?(trace)
         return false unless trace.event == :c_call
-        return false unless trace.self.equal?(File) || trace.self.equal?(IO)
+        return false unless ObjectIdentity.equal?(trace.self, File) || ObjectIdentity.equal?(trace.self, IO)
         %i[read binread readlines foreach].include?(trace.method_id)
       end
 
@@ -454,14 +454,28 @@ module Minitest
           details: details || {}
         ))
       rescue PathError => error
-        record_failure(:outside_root, error)
+        record_failure(:outside_root, error, path: raw_path)
       rescue TypeError => error
         record_failure(:noncanonical_observation, error)
       rescue => error
         record_failure(:extractor_error, error)
       end
 
-      def record_failure(reason, error)
+      def record_failure(reason, error, path: nil)
+        @session.incomplete(reason) unless reason == :outside_root
+        path = path.to_s if path.respond_to?(:to_path) || path.respond_to?(:to_str)
+        path = File.realpath(File.expand_path(path)) if path && reason == :outside_root
+        @session.record(Observation.build(
+          kind: @observer.event_kind,
+          provider: @definition.id.to_sym,
+          path: path,
+          operation: @observer.notification_name.to_sym,
+          test_id: ExecutionContext.current_test,
+          exists_at_observation: path && File.exist?(path),
+          reason: reason,
+          details: {"error" => error.class.name}
+        ))
+      rescue SystemCallError, ArgumentError, TypeError
         @session.incomplete(reason)
         @session.record(Observation.build(
           kind: @observer.event_kind,

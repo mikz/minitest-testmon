@@ -15,6 +15,10 @@ class ProviderObserverTest < TestmonTestCase
         [value, max_depth]
       end
 
+      def equal?(*args)
+        raise "observer dispatched identity to #{args.inspect}"
+      end
+
       def load_document(filename)
         File.binread(filename)
       end

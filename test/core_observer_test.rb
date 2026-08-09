@@ -3,6 +3,16 @@
 require_relative "test_helper"
 
 class CoreObserverTest < TestmonTestCase
+  def test_native_event_identity_does_not_dispatch_to_the_receiver
+    receiver = Object.new
+    receiver.define_singleton_method(:equal?) { |*| raise "receiver identity dispatched" }
+    event = Struct.new(:self, :method_id, :defined_class).new(receiver, :unknown, Object)
+    observer = Minitest::Testmon::CoreObserver.allocate
+    observer.instance_variable_set(:@native_project_methods, {})
+
+    observer.send(:observe_c_call, event)
+  end
+
   def test_file_object_is_resolved_and_direct_c_read_is_unresolved
     with_project do |project|
       data = write_file(File.join(project, "data.txt"), "value")

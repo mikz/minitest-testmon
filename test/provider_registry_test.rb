@@ -254,6 +254,22 @@ class ProviderRegistryTest < TestmonTestCase
     end
   end
 
+  def test_ignore_does_not_reclassify_non_path_observer_failures
+    configuration = Minitest::Testmon::Configuration.new(cwd: Dir.pwd)
+    configuration.provider :events, version: 1 do
+      ignore :event_read, reason: "too broad", predicate: ->(_observation) { true }
+    end
+    session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+    session.record(Minitest::Testmon::Observation.build(
+      kind: :event_read,
+      reason: :observer_error
+    ))
+
+    report = session.finalize
+
+    assert_equal :observer_error, report.observations.fetch(0).reason
+  end
+
   def test_snapshot_digest_detects_content_and_membership_drift
     with_project do |project|
       first = write_file(File.join(project, "catalog", "one.txt"), "one")

@@ -228,6 +228,39 @@ module Minitest
           false
         end
 
+        def external_gem_path?(path, configured_roots)
+          return false unless path
+
+          canonical = File.realpath(File.expand_path(path.to_s))
+          roots = Array(configured_roots).map { |root| File.realpath(File.expand_path(root.to_s)) }
+          return false if roots.any? { |root| contained?(canonical, root) }
+
+          Gem.loaded_specs.values.any? do |spec|
+            gem_root = spec.full_gem_path
+            gem_root && contained?(canonical, File.realpath(File.expand_path(gem_root)))
+          rescue SystemCallError, ArgumentError, TypeError
+            false
+          end
+        rescue SystemCallError, ArgumentError, TypeError
+          false
+        end
+
+        def physical_view_path(identifier)
+          return identifier unless identifier.is_a?(String) || identifier.is_a?(Pathname)
+
+          original = identifier.to_s
+          return nil if original.empty?
+          candidate = original
+          until File.file?(candidate)
+            shortened = candidate.sub(/\.[^\/.]+\z/, "")
+            return original if shortened == candidate
+            candidate = shortened
+          end
+          File.realpath(candidate)
+        rescue SystemCallError, ArgumentError, TypeError
+          original
+        end
+
         class BootDefinition
           def define(builder)
             builder.inventory :boot,
@@ -255,6 +288,7 @@ module Minitest
         class ViewsDefinition
           def initialize(configuration)
             @specs = Rails81.inventory_specs(configuration, Rails81.view_roots, prefix: :views)
+            @configured_roots = configuration.roots.values.freeze
           end
 
           def define(builder)
@@ -274,9 +308,15 @@ module Minitest
               builder.observe_notification :rails_view,
                 event_name,
                 path: ->(notification) {
-                  notification.payload[:identifier] || notification.payload["identifier"]
+                  identifier = notification.payload[:identifier] || notification.payload["identifier"]
+                  Rails81.physical_view_path(identifier)
                 }
             end
+            builder.ignore :rails_view,
+              reason: "view source belongs to a loaded gem outside configured roots",
+              predicate: ->(observation) {
+                Rails81.external_gem_path?(observation.path, @configured_roots)
+              }
             targets.each do |inventory, content, membership|
               builder.claim :rails_view, to: [inventory, content], path: :path
               builder.claim :rails_view, to: [inventory, membership]

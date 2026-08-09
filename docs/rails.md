@@ -150,6 +150,13 @@ successful render signal observes every failed or shadowed lookup, so membership
 is copied into every passing test snapshot. The same conservative rule applies
 to locale, fixture, and asset inventories.
 
+View notifications may also identify layouts supplied by a loaded engine gem
+whose files are outside every configured root. Those dependency-owned views are
+reported as intentionally ignored rather than making publication incomplete.
+An outside path that is not an existing file under a loaded gem remains
+unresolved and fails closed. Add an explicit named root when shared application
+views outside the project should participate in dependency checksums.
+
 At every `ActiveSupport::TestCase` boundary, the fixture provider reads the
 public `fixture_table_names` declaration. Named declarations claim matching
 content; `fixtures :all` claims all frozen fixture content. The fixture-path

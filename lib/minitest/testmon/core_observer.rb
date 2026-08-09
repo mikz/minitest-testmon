@@ -236,7 +236,7 @@ module Minitest
           return
         end
 
-        native_source = @native_project_methods[[event.defined_class.object_id, event.method_id]]
+        native_source = @native_project_methods[[ObjectIdentity.id(event.defined_class), event.method_id]]
         if native_source
           record_ruby_execution(
             native_source.fetch(:path),
@@ -255,7 +255,7 @@ module Minitest
           return
         end
 
-        return unless receiver.equal?(File) || receiver.equal?(IO)
+        return unless ObjectIdentity.equal?(receiver, File) || ObjectIdentity.equal?(receiver, IO)
         return unless DIRECT_READS.include?(event.method_id)
         return unless project_callsite?(event.path)
         safe_record(Observation.build(
@@ -383,7 +383,7 @@ module Minitest
             if iseq
               install_target(iseq)
             else
-              @native_project_methods[[owner.object_id, method_name]] = {
+              @native_project_methods[[ObjectIdentity.id(owner), method_name]] = {
                 path: locator.absolute_path,
                 line: Integer(location[1])
               }.freeze

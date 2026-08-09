@@ -411,12 +411,18 @@ module Minitest
             end
             next if ignored
           end
-          next if observation.unresolved? && observation.reason != :late_activation
+          if observation.unresolved? && !%i[outside_root late_activation].include?(observation.reason)
+            next
+          end
           ignored = snapshot.registrations.any? do |registration|
             registration.provider.respond_to?(:ignore_observation) &&
               registration.provider.ignore_observation(observation, claims)
           end
           next if ignored
+          if observation.reason == :outside_root
+            claims.incomplete(:outside_root)
+            next
+          end
           claimed = false
           snapshot.registrations.each do |registration|
             claimed = registration.provider.claim(observation, claims) || claimed if registration.provider.respond_to?(:claim)

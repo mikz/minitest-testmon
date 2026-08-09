@@ -39,6 +39,8 @@ module Minitest
         @tracked_files = ObjectSpace::WeakMap.new
         @pending_loads = {}
         @unattributed_execution = {}
+        @ruby_execution = {}
+        @native_project_methods = {}
         @source_lines = {}
       end
 
@@ -52,6 +54,10 @@ module Minitest
         @trace = TracePoint.new(*events) { |event| observe(event) }
         @trace.enable
         install_existing_project_targets
+        if !@observe_files && !@native_project_methods.empty?
+          @native_trace = TracePoint.new(:c_call) { |event| observe(event) }
+          @native_trace.enable
+        end
         self
       rescue
         close
@@ -62,6 +68,7 @@ module Minitest
         return if @closed
         @closed = true
         @trace&.disable
+        @native_trace&.disable
         @target_traces&.each_value(&:disable)
       end
 
@@ -77,9 +84,10 @@ module Minitest
           return
         end
         case event.event
-        when :call
-          observe_ruby_loader(event)
+        when :call, :b_call
+          observe_ruby_execution(event)
         when :line
+          observe_ruby_execution(event)
           observe_constant_reads(event)
         when :c_call
           observe_c_call(event)
@@ -98,7 +106,7 @@ module Minitest
 
       def observe_unattributed_execution(event)
         return unless @boundary_tracker&.boundary_active?
-        return unless %i[line call].include?(event.event)
+        return unless RUBY_TARGET_TRACE_EVENTS.include?(event.event)
         locator = ruby_locator(event.path)
         return unless locator
 
@@ -129,8 +137,8 @@ module Minitest
         safe_record(build_observation(:ruby_script, locator.absolute_path, operation, event))
       end
 
-      def observe_ruby_loader(event)
-        if event.method_id == :require
+      def observe_ruby_execution(event)
+        if event.event == :call && event.method_id == :require
           event_binding = event.binding
           return unless event_binding
           parameter = event.parameters.find { |kind, _name| %i[req opt].include?(kind) }
@@ -147,16 +155,34 @@ module Minitest
         return unless test_id
         locator = ruby_locator(event.path)
         return unless locator
-        safe_record(Observation.build(
-          kind: :coverage_lines,
-          path: locator.absolute_path,
-          operation: :tracepoint_call,
-          test_id: test_id,
-          exists_at_observation: true,
-          details: {lines: [event.lineno], method_id: event.method_id.to_s}
-        ))
+        record_ruby_execution(
+          locator.absolute_path,
+          event,
+          line: event.lineno,
+          operation: :"tracepoint_#{event.event}"
+        )
       rescue NameError, TypeError
         nil
+      end
+
+      def record_ruby_execution(path, event, line:, operation:)
+        test_id = ExecutionContext.current_test
+        return unless test_id
+        key = [test_id, path]
+        return if @ruby_execution[key]
+        @ruby_execution[key] = true
+        safe_record(Observation.build(
+          kind: :coverage_lines,
+          path: path,
+          operation: operation,
+          test_id: test_id,
+          exists_at_observation: true,
+          details: {
+            lines: [Integer(line)],
+            event: event.event.to_s,
+            method_id: event.method_id&.to_s
+          }.compact
+        ))
       end
 
       def observe_constant_reads(event)
@@ -207,6 +233,17 @@ module Minitest
         receiver = event.self
         if event.method_id == :load && TraceOwner.label(event.defined_class).to_s.include?("Kernel")
           @pending_loads[Thread.current] = true
+          return
+        end
+
+        native_source = @native_project_methods[[event.defined_class.object_id, event.method_id]]
+        if native_source
+          record_ruby_execution(
+            native_source.fetch(:path),
+            event,
+            line: native_source.fetch(:line),
+            operation: :native_method_call
+          )
           return
         end
 
@@ -339,8 +376,18 @@ module Minitest
           end
           method_names.each do |method_name|
             method = MODULE_METHOD_LOOKUP.bind_call(owner, method_name)
-            next unless ruby_path_allowed?(method.source_location&.first)
-            install_target(RubyVM::InstructionSequence.of(method))
+            location = method.source_location
+            locator = ruby_locator(location&.first)
+            next unless locator
+            iseq = RubyVM::InstructionSequence.of(method)
+            if iseq
+              install_target(iseq)
+            else
+              @native_project_methods[[owner.object_id, method_name]] = {
+                path: locator.absolute_path,
+                line: Integer(location[1])
+              }.freeze
+            end
           rescue NameError, TypeError
             next
           end
@@ -360,7 +407,7 @@ module Minitest
         @target_traces ||= {}
         return if @target_traces.key?(iseq.object_id)
 
-        trace = TracePoint.new(:line, :call) { |event| observe(event) }
+        trace = TracePoint.new(*RUBY_TARGET_TRACE_EVENTS) { |event| observe(event) }
         trace.enable(target: iseq)
         @target_traces[iseq.object_id] = trace
       rescue ArgumentError, RuntimeError => error

@@ -2,6 +2,8 @@
 
 module Minitest
   module Testmon
+    RUBY_TARGET_TRACE_EVENTS = %i[line call b_call].freeze
+
     RubyTraceCapability = Data.define(:identity, :type, :label, :trace_points) do
       def signature
         {
@@ -77,7 +79,7 @@ module Minitest
       end
 
       def target_traceable?(iseq)
-        trace = TracePoint.new(:line, :call) {}
+        trace = TracePoint.new(*RUBY_TARGET_TRACE_EVENTS) {}
         trace.enable(target: iseq)
         true
       rescue ArgumentError, RuntimeError

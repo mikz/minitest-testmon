@@ -87,30 +87,27 @@ class MetaprogrammingAdversarialTest < TestmonTestCase
     end
   end
 
-  def test_native_attr_accessor_is_connected_through_its_declaring_constant
+  def test_native_attr_accessor_is_attributed_to_its_declaring_source
     with_project do |project|
       declaration = write_file(File.join(project, "lib/accessor_target.rb"), <<~RUBY)
         class TestmonAccessorTarget
           attr_accessor :generated_value
         end
       RUBY
-      runner = write_file(File.join(project, "lib/accessor_runner.rb"), <<~RUBY)
-        module TestmonAccessorRunner
-          def self.call
-            target = TestmonAccessorTarget.new
-            target.generated_value = :accessor
-            target.generated_value
-          end
-        end
-      RUBY
       load declaration
-      load runner
+      target = TestmonAccessorTarget.new
 
-      report = observe(project) { TestmonAccessorRunner.call }
+      report = observe(project) do
+        target.generated_value = :accessor
+        target.generated_value
+      end
 
       assert_test_dependency report, "lib/accessor_target.rb"
+      native_call = report.observations.any? do |observation|
+        observation.operation == :native_method_call && observation.path == File.realpath(declaration)
+      end
+      assert native_call
     ensure
-      remove_constant(:TestmonAccessorRunner)
       remove_constant(:TestmonAccessorTarget)
     end
   end

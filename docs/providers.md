@@ -259,11 +259,13 @@ ERB, translation, or custom data the script used. The declared inventory is
 still the selection-time source of truth, and non-Ruby inputs still need their
 own observations and claims.
 
-Project `:line` and `:call` events use MRI instruction-sequence targets rather
-than a global Ruby-line callback. Preloaded methods/procs are targeted from the
-sealed Ruby inventory; `:script_compiled` adds targets for code loaded later.
-This is also the safety detector for project code running on an unattributed
-thread while a test is active.
+Project `:line`, `:call`, and `:b_call` events use MRI instruction-sequence
+targets rather than a global Ruby-line callback. Preloaded methods/procs are
+targeted from the sealed Ruby inventory; `:script_compiled` adds targets for
+code loaded later. A preloaded C-backed method with project source, such as an
+`attr_accessor`, is indexed by its exact owner and method name and attributed
+from `:c_call` to that source. This is also the safety detector for project code
+running on an unattributed thread while a test is active.
 
 Generic C-level `File`/`IO` observations are enabled by `run --full`. They also
 remain enabled during a normal run whenever an active

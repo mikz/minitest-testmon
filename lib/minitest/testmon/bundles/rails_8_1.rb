@@ -220,6 +220,14 @@ module Minitest
           path == root || path.start_with?("#{root}#{File::SEPARATOR}")
         end
 
+        def overlapping?(left, right)
+          left = File.realpath(File.expand_path(left))
+          right = File.realpath(File.expand_path(right))
+          contained?(left, right) || contained?(right, left)
+        rescue SystemCallError, ArgumentError, TypeError
+          false
+        end
+
         class BootDefinition
           def define(builder)
             builder.inventory :boot,
@@ -330,9 +338,13 @@ module Minitest
         # same way locale lookups claim every locale file.
         class AssetsDefinition
           def initialize(configuration)
-            @asset_specs = Rails81.inventory_specs(configuration, Rails81.asset_roots, prefix: :assets)
+            asset_roots = Rails81.asset_roots
+            input_directories = Rails81.asset_input_directories(configuration).reject do |directory|
+              asset_roots.any? { |root| Rails81.overlapping?(directory, root) }
+            end
+            @asset_specs = Rails81.inventory_specs(configuration, asset_roots, prefix: :assets)
             @input_specs = Rails81.inventory_specs(
-              configuration, Rails81.asset_input_directories(configuration), prefix: :asset_input_trees
+              configuration, input_directories, prefix: :asset_input_trees
             )
             @input_specs += Rails81.inventory_specs(
               configuration, Rails81.asset_input_files(configuration), prefix: :asset_input_files, files: true

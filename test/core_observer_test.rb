@@ -121,7 +121,9 @@ class CoreObserverTest < TestmonTestCase
       end
       observer.close
 
-      observation = session.observations.find { |item| item.operation == :tracepoint_call }
+      observation = session.observations.find do |item|
+        item.kind == :coverage_lines && item.path == File.realpath(script)
+      end
       refute_nil observation
       assert_equal File.realpath(script), observation.path
     ensure
@@ -161,7 +163,9 @@ class CoreObserverTest < TestmonTestCase
       end
       observer.close
 
-      observation = session.observations.find { |item| item.operation == :tracepoint_call }
+      observation = session.observations.find do |item|
+        item.kind == :coverage_lines && item.path == File.realpath(script)
+      end
       refute_nil observation
       assert_equal File.realpath(script), observation.path
     ensure
@@ -208,7 +212,7 @@ class CoreObserverTest < TestmonTestCase
       assert_equal [File.realpath(script)], snapshot.ruby_unhookable_paths
       capability = snapshot.context.capabilities.fetch(0)
       assert_equal "project:lib/unhookable.rb", capability.fetch(:source)
-      assert_equal %w[line call], capability.fetch(:requested_events)
+      assert_equal %w[line call b_call], capability.fetch(:requested_events)
       assert_equal(
         [[1, "class"], [2, "end"]],
         capability.fetch(:unhookable).fetch(0).fetch(:trace_points)
@@ -286,7 +290,7 @@ class CoreObserverTest < TestmonTestCase
       report = session.finalize
 
       observation = report.observations.find do |item|
-        item.operation == :tracepoint_call && item.path == File.realpath(script)
+        item.kind == :coverage_lines && item.path == File.realpath(script)
       end
       refute_nil observation
       assert_equal test_id, observation.test_id

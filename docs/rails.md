@@ -41,7 +41,10 @@ an asset URL — a system test loading a page, or any test rendering
 `stylesheet_link_tag` — claims that asset's content. Build inputs that cannot
 be tied to one logical path (importmap, `package.json`, lockfiles, bundler
 configs, `app/javascript` sources) are claimed conservatively by every
-asset-resolving test, the same way locale lookups claim every locale file.
+asset-resolving test, the same way locale lookups claim every locale file. When
+a configured Propshaft asset root contains one of those conventional build
+input directories (or is contained by it), the precise asset inventory owns
+the overlapping tree; Testmon does not declare it again as a coarse input.
 
 Nested application data such as `config/policies/**/*.yml` is intentionally not
 claimed by `rails.boot@1`. Give it an application provider so edits to existing

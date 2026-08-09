@@ -45,7 +45,7 @@ module Minitest
           kind: "ruby_target_trace",
           provider: provider_id,
           source: locator.key,
-          requested_events: %w[line call],
+          requested_events: RUBY_TARGET_TRACE_EVENTS.map(&:to_s),
           unhookable: unhookable.map(&:signature).sort_by { |item| item.fetch(:identity) }
         }
       end

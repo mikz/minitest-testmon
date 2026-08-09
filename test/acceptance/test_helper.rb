@@ -2,8 +2,16 @@
 
 require "minitest/autorun"
 require "rbconfig"
+require "active_support"
+require "active_support/test_case"
 
 require "minitest_testmon_acceptance"
+
+ActiveSupport::TestCase.parallelize(
+  workers: 4,
+  with: :processes,
+  threshold: 0
+)
 
 module ProductAcceptance
   def driver

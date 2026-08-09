@@ -160,8 +160,10 @@ not replace the last accepted state.
 
 Activated Rails applications automatically get versioned providers for boot
 inputs, schema files, views, locales, fixtures, and Propshaft assets when
-available. Native process workers are supported; Rails thread parallelization
-is rejected before tests start because per-test evidence would be ambiguous.
+available. Rails process workers are supported, including an explicit
+`parallelize_me!` when Rails process parallelization is active. Thread-backed
+Minitest parallel tests and Rails thread parallelization are rejected before
+tests start because per-test evidence would be ambiguous.
 
 ```ruby
 # Opt out of all automatic Rails 8.1 providers.

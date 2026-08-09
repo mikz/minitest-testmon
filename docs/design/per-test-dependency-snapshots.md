@@ -150,10 +150,11 @@ failure is rejected the same way.
 
 Serial execution has one active coverage boundary. Rails process workers each
 record observations and exact executed IDs to a run-scoped spool; workers do not
-open SQLite. The parent validates all spools and publishes once. Rails thread
-workers and native Minitest `parallelize_me!` are rejected because Ruby Coverage
-and framework notifications are process-global and overlapping test boundaries
-cannot be attributed safely.
+open SQLite. The parent validates all spools and publishes once. An explicit
+`parallelize_me!` uses that supported path when Rails process parallelization is
+active. Thread-backed Minitest parallel tests and Rails thread workers are
+rejected because Ruby Coverage and framework notifications are process-global
+and overlapping test boundaries cannot be attributed safely.
 
 ## Core invariants
 

@@ -18,6 +18,10 @@ Run the harness from the repository root:
 bundle exec rake test:acceptance
 ```
 
+The harness uses Minitest's standard parallel scheduling with Rails' process
+executor. `PARALLEL_WORKERS` controls the process count through the normal Rails
+convention; no acceptance-specific sharding is used.
+
 The harness defaults to the repository's `exe/minitest-testmon`. Override it
 without changing the fixtures:
 
@@ -35,7 +39,7 @@ fixtures are never mutated.
 
 ## Rails 8.1 gate
 
-The Rails acceptance fixture requires Ruby 4, Rails 8.1 or newer, PostgreSQL
+The Rails acceptance fixture requires Ruby 4, Rails 8.1, PostgreSQL
 access through the `pg` gem, and SimpleCov. It creates uniquely named
 disposable test databases, including Rails' native per-worker databases, and
 drops them after each case. It never uses an application database.
@@ -43,12 +47,15 @@ The fixture sets `PGGSSENCMODE=disable` only in its child environment to avoid
 pg/libpq GSS state inherited across `fork` on the supported Ruby 4 runtime;
 this is not product configuration.
 
-The Rails matrix treats native process parallelization as supported and native
-thread parallelization as an explicit pre-test rejection. It compares workers
-1, 2, and 4; exercises the five auto-activated Rails provider bundles; mutates
-view content and membership, locales, declared and manually loaded fixtures,
-boot inputs, and schema inputs; kills a worker; checks both SimpleCov load
-orders; and observes worker file descriptors with `lsof` when available.
+The Rails matrix treats process parallelization, including process-backed
+`parallelize_me!`, as supported and thread parallelization as an explicit
+pre-test rejection. It also rejects an explicit parallel test when Rails process
+parallelization is inactive, before Rails can discard the queued test. The
+matrix compares workers 1, 2, and 4; exercises the five auto-activated Rails
+provider bundles; mutates view content and membership, locales, declared and
+manually loaded fixtures, boot inputs, and schema inputs; kills a worker; checks
+both SimpleCov load orders; and observes worker file descriptors with `lsof`
+when available.
 
 The direct Rails CLI matrix carries an exact stock `bin/rails` in the fake
 application. The fixture conventionally autorequires its test-group gems with

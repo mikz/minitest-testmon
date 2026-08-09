@@ -52,7 +52,7 @@ module MinitestTestmonAcceptance
 
     def self.assert_rejected_before_marker!(result:, report:, marker:)
       errors = []
-      errors << "thread-mode command exited zero" if result.success?
+      errors << "unsupported parallel command exited zero" if result.success?
       errors << "stderr omitted Rails process parallelization" unless result.stderr.include?("Rails process parallelization")
       errors << "test marker exists" if marker.exist?
       if report

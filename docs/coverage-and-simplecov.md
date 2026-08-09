@@ -9,9 +9,10 @@ around each serial test with `Coverage.peek_result` and records files whose
 counters increased. It never clears counters between tests.
 
 Coverage is process-global, so overlapping thread-parallel tests would make the
-owner ambiguous. Testmon rejects Rails thread workers and native Minitest
-`parallelize_me!`. Rails process workers instead record boundaries in each child
-and send observations to the parent through validated spools.
+owner ambiguous. Testmon rejects thread-backed Minitest parallel tests and Rails
+thread workers. An explicit `parallelize_me!` is supported when Rails process
+parallelization is active: each child records its own boundaries and sends
+observations to the parent through validated spools.
 
 TracePoint supplies complementary evidence for code compiled or loaded after
 observers start, preloaded project methods, file operations, and child-thread

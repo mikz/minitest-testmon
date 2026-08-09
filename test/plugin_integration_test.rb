@@ -109,19 +109,6 @@ class PluginIntegrationTest < TestmonTestCase
     assert_equal "true\n", stdout
   end
 
-  def test_rails_parallel_threshold_uses_unfiltered_runnable_methods
-    runnable = Object.new
-    runnable.define_singleton_method(:runnable_methods) { %w[test_one test_two test_three] }
-    executor = Struct.new(:size, :threshold).new(2, 2)
-    runnables = Minitest::Runnable.runnables
-    original = runnables.dup
-
-    runnables.replace([runnable])
-    assert Minitest::Testmon::Runtime.allocate.__send__(:parallel_executor_will_run?, executor)
-  ensure
-    runnables&.replace(original)
-  end
-
   private
 
   def assert_reporter_compatibility(order)

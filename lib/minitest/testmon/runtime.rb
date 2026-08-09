@@ -50,9 +50,9 @@ module Minitest
           boundary_tracker: @collector
         ).start)
         @store.acquire_lease!(run_id: @run_id)
-        reject_thread_parallelism!(discovered)
-
         @process_parallel = rails_process_parallel?
+        reject_unsupported_parallelism!(discovered)
+
         prepare_process_run if @process_parallel
         @current_inputs = current_inputs
         @selection = choose_selection
@@ -189,19 +189,19 @@ module Minitest
       end
 
       def rails_executor
+        return unless defined?(ActiveSupport::Testing::ParallelizeExecutor)
+
         executor = Minitest.parallel_executor
-        return unless executor.respond_to?(:parallelize_with) && executor.respond_to?(:size)
-        executor
+        executor if executor.is_a?(ActiveSupport::Testing::ParallelizeExecutor)
       end
 
-      def reject_thread_parallelism!(discovered)
-        native_parallel = Minitest::Runnable.runnables.any? do |runnable|
-          runnable.respond_to?(:run_order) && runnable.run_order == :parallel
-        end
-        executor = rails_executor
-        rails_threads = executor && executor.parallelize_with == :threads && parallel_executor_will_run?(executor)
-        return unless native_parallel || rails_threads
-        message = "unsupported_parallelism: minitest-testmon supports serial tests and Rails process parallelization; test threads are unsupported"
+      def reject_unsupported_parallelism!(discovered)
+        return unless unsupported_parallelism?
+
+        reject_parallelism!(discovered)
+      end
+
+      def reject_parallelism!(discovered)
         @selection = Selection.new(
           discovered: discovered,
           selected: [],
@@ -209,9 +209,27 @@ module Minitest
           base_revision: @store.revision
         )
         @store.start_execution(run_id: @run_id, selection: @selection)
+        infrastructure_failure!(:unsupported_parallelism)
         write_rejected_report("unsupported_parallelism", discovered)
         @store.close
-        raise UnsupportedParallelism, message
+        raise UnsupportedParallelism,
+          "unsupported_parallelism: parallel tests require active Rails process parallelization"
+      end
+
+      def unsupported_parallelism?
+        return false if process_parallel?
+
+        executor = rails_executor
+        active_non_process_executor = executor &&
+          executor.parallelize_with != :processes &&
+          parallel_executor_will_run?(executor)
+        active_non_process_executor || parallel_runnables?
+      end
+
+      def parallel_runnables?
+        Minitest::Runnable.runnables.any? do |runnable|
+          runnable.respond_to?(:run_order) && runnable.run_order == :parallel
+        end
       end
 
       def rails_process_parallel?

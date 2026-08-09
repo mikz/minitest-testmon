@@ -242,17 +242,26 @@ to remove a validated run uses the same fail-closed reason and cannot publish a
 new revision. Suite-scoped observations remain diagnostic; their current inputs
 are copied into each passing test snapshot by the parent snapshot builder.
 
-Rails thread parallelization and native Minitest `parallelize_me!` are rejected
-before any test executes:
+An explicit `parallelize_me!` is supported when Rails process parallelization
+is active:
 
 ```ruby
-parallelize(workers: 4, with: :threads) # unsupported
-parallelize_me!                          # unsupported
+class ActiveSupport::TestCase
+  parallelize(workers: 4, with: :processes, threshold: 0)
+end
+
+class SomeTest < ActiveSupport::TestCase
+  parallelize_me! # supported by the active Rails process executor
+end
 ```
 
-The command reports `unsupported_parallelism` and mentions `Rails process
-parallelization`. It does not change the previous snapshot revision or
-inventory.
+Thread-backed Minitest parallel tests and active non-process Rails
+parallelization remain unsupported. An explicit `parallelize_me!` is also
+rejected when Rails process parallelization is inactive, because Rails would
+otherwise discard its queued tests. The command reports
+`unsupported_parallelism` before any test executes and does not change the
+previous snapshot revision or inventory. Custom executor objects are rejected
+unless they follow Rails' process-executor convention.
 Per-test `Coverage` deltas and process-global notifications cannot be assigned
 soundly when test bodies overlap in threads.
 

@@ -80,6 +80,52 @@ class RailsAcceptanceTest < Minitest::Test
     MinitestTestmonAcceptance::RailsOracle.assert_equivalent!(reports)
   end
 
+  def test_explicit_parallelize_me_uses_active_rails_process_workers
+    with_rails_project(workers: 2) do |project, runtime|
+      marker = project.path.join("tmp/process-parallel-test-marker")
+      parent_marker = project.path.join("tmp/process-parallel-parent-marker")
+      report = learn_rails_baseline(project, runtime, extra_env: {
+        "RAILS_ACCEPTANCE_PARALLELIZE_ME" => "1",
+        "RAILS_ACCEPTANCE_PARALLEL_PARENT_MARKER" => parent_marker.to_s,
+        "RAILS_ACCEPTANCE_TEST_MARKER" => marker.to_s
+      })
+
+      test_id = find_test_id(report, "UnrelatedTest#test_unrelated")
+      assert_includes report.dig("tests", "executed"), test_id
+      parent_pid = Integer(parent_marker.read)
+      execution = marker.readlines.find { |line| line.include?(test_id) }
+      refute_nil execution, "explicit parallel test did not reach its setup marker"
+      refute_equal parent_pid, Integer(execution.split(":", 2).first),
+        "explicit parallel test ran in the Rails parent instead of a process worker"
+    end
+  end
+
+  def test_explicit_parallelize_me_is_rejected_when_rails_processes_are_inactive
+    with_rails_project(workers: 1) do |project, runtime|
+      baseline = learn_rails_baseline(project, runtime)
+      marker = project.path.join("tmp/inactive-process-test-marker")
+      parent_marker = project.path.join("tmp/inactive-process-parent-marker")
+      result = driver.run(project, env: runtime.env.merge(
+        "RAILS_ACCEPTANCE_PARALLELIZE_ME" => "1",
+        "RAILS_ACCEPTANCE_PARALLEL_PARENT_MARKER" => parent_marker.to_s,
+        "RAILS_ACCEPTANCE_TEST_MARKER" => marker.to_s
+      ))
+      report = driver.report(project)
+      assert_report_contract report
+
+      MinitestTestmonAcceptance::RailsOracle.assert_rejected_before_marker!(
+        result:,
+        report:,
+        marker:
+      )
+      assert parent_marker.exist?, "explicit parallel declaration was not loaded"
+      assert_equal baseline.fetch("generation"), report.fetch("generation")
+      assert_equal baseline.fetch("inventory"), report.fetch("inventory"),
+        "inactive-process rejection changed the last published dependency edges"
+      assert_empty report.dig("tests", "executed")
+    end
+  end
+
   def test_thread_parallelization_is_rejected_before_tests_and_preserves_generation
     with_rails_project do |project, runtime|
       baseline = learn_rails_baseline(project, runtime)

@@ -12,10 +12,9 @@ Every supported input follows the same model:
 3. **Observations and claims** connect a public runtime signal to declared
    artifacts for the current test.
 
-If an observation cannot be claimed or intentionally ignored, the provider is
-incomplete. Testmon does not invent an edge from an unknown path. After the test
-command completes, the wrapper leaves the cache unchanged, warns, and returns
-the command's native status.
+If Testmon cannot determine an input safely, it does not guess. The test result
+is preserved, Testmon prints a warning, and the last known-good cache remains in
+use.
 
 ## Registration
 

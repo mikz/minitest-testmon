@@ -97,15 +97,10 @@ without starting the runtime.
 
 The first successful run stores one dependency snapshot per passing test. Each
 snapshot contains the exact checksum of every input learned for that test. A
-later run with no relevant change executes no tests. The wrapper executes the
-test command once and returns its native status. If Testmon cannot safely
-publish evidence after a successful command, it leaves the cache unchanged and
-prints a warning instead of replacing the native status with exit 4. Exit 2 is
-invalid CLI usage, exit 3 means another process holds the cache lease, and exit
-4 remains reserved for unsupported invocation or infrastructure errors that
-prevent the test command from completing. Direct plugin activation reports
-incomplete evidence or lease contention as exit 4. To inspect why a path selects
-tests:
+later run with no relevant change executes no tests. Tests run once, and their
+normal result remains authoritative. If Testmon cannot safely update its cache,
+it keeps the last known-good state and prints a warning. Invalid or unsupported
+commands still fail clearly. To inspect why a path selects tests:
 
 ```sh
 bundle exec minitest-testmon explain app/views/accounts/show.html.erb
@@ -125,29 +120,18 @@ bundle exec minitest-testmon run -- bin/rails test
 bundle exec minitest-testmon run --full -- bin/rails test
 ```
 
-For generic commands, Minitest's native filters define the currently discovered
-runnables and Testmon selects within that list. `run --full` forces all of those
-currently discovered runnables; it does not broaden the child command's filter.
-Use an unfiltered complete suite with `--full` when validating a provider. Rails
-continues to accept only its two canonical complete-suite shapes. Publication
-requires an exact execution ledger, passing non-skipped tests, complete provider
-evidence, and an unchanged inventory. Rejection preserves the accepted snapshot
-revision.
+Existing Minitest filters still apply. `run --full` runs every test included by
+the command, but it does not remove those filters. Use an unfiltered complete
+suite with `--full` when validating a provider. Testmon updates its cache only
+after a complete, successful run; otherwise it keeps the last known-good state.
 
-For Rails, early-boot wrapper support intentionally recognizes only the
-project's actual `bin/rails` with exactly `test` or `test:all`. Testmon derives
-the canonical application root from that launcher, resolves default
-configuration and state there, runs the child from that root, and lets Bundler
-plus the Railtie activate observers at `before_configuration`. Other command
-shapes are rejected with exit 2 before spawn when either the configured project
-or a child-command token identifies a Rails application. The generic preload
-path is for non-Rails projects only. A successful child that produces no valid
-completed run receipt leaves the cache unchanged, emits a warning, and still
-returns zero.
+For Rails, use the project's own `bin/rails` with exactly `test` or `test:all`.
+Other command shapes are rejected before tests start. If Testmon cannot safely
+learn from a successful run, it keeps the last known-good cache and prints a
+warning.
 
-The wrapper rejects inherited `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` before
-spawn. The child plugin repeats that check after Rails boot so configuration or
-application code cannot turn a verified full-suite command into a partial run.
+Testmon also rejects `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` because they can
+silently turn a complete suite into a partial run.
 
 SQLite stores the current per-test snapshots and deterministic retained run
 receipts in `.minitest-testmon.sqlite3`. Read the latest receipt with

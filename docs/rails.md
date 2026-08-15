@@ -88,12 +88,10 @@ With command-line activation, the equivalent form is
 `bin/rails test --testmon --testmon-db=tmp/testmon/state.sqlite3`. The
 separated `--testmon-db PATH` form is not supported for direct Rails commands
 because Rails can treat `PATH` as a test path. The option requires activation
-through `MINITEST_TESTMON` or `--testmon`. Invalid configuration also exits 2.
-Direct plugin activation exits 4 for incomplete evidence, an unavailable
-observer, a worker protocol failure, or cache contention. The wrapper instead
-runs the complete Rails command once and preserves its native status when
-post-test evidence cannot be published. Unsupported parallel execution remains
-an explicit exit 4. Ordinary Minitest failures keep exit 1.
+through `MINITEST_TESTMON` or `--testmon`. Invalid or unsupported commands fail
+before tests start. Once a supported run starts, the normal Minitest result
+remains authoritative. If Testmon cannot safely update its cache, it keeps the
+last known-good state and prints a warning.
 
 Plain `bin/rails test --help` is intentionally inert and cannot advertise
 Testmon. `MINITEST_TESTMON=1 bin/rails test --help` (or
@@ -111,21 +109,15 @@ bundle exec minitest-testmon run --full -- bin/rails test:all
 `run` selects the affected tests; a cold cache selects every discovered test.
 `run --full` adds every discovered test with reason `forced` on a warm cache.
 
-The launcher must be the project's actual `bin/rails` and `test` or `test:all`
-must be its only argument. Testmon derives the application root from that launcher before
-loading `.minitest-testmon.rb`, resolves default state paths under that root,
-and spawns Rails with that working directory. It deliberately omits the generic
-`RUBYOPT` plugin preload so Bundler and the Railtie own early activation; this
-keeps custom TracePoint targets defined by configuration visible before the
-application body runs. Other command shapes are rejected with exit 2 before
-spawn when the configured root or a child token identifies a Rails application;
-generic wrapper preloading is reserved for non-Rails projects. A successful
-child without a fresh valid Testmon report leaves the cache unchanged, emits a
-warning, and returns zero.
+Run the command from the Rails project and use its own `bin/rails` with exactly
+`test` or `test:all`. This ensures Testmon uses the correct configuration and
+cache. Other command shapes are rejected before tests start. If Testmon cannot
+safely learn from a successful run, it keeps the last known-good cache and
+prints a warning.
 
-Inherited `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` are rejected before wrapper
-spawn. The Rails child checks them again after boot, covering changes made by
-configuration or application code before Minitest initialization.
+Testmon rejects `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` because they can
+silently narrow the suite. Remove those filters, or run Rails without Testmon
+when you intentionally need a partial suite.
 
 To disable the complete automatic bundle:
 

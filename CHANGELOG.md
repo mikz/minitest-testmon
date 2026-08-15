@@ -2,10 +2,8 @@
 
 ## Unreleased
 
-- Make wrapper publication fail open: after the test command runs once,
-  incomplete or malformed Testmon evidence leaves the cache unchanged and the
-  wrapper returns the command's native status. Unsupported invocations remain
-  explicit errors.
+- Prevent Testmon problems from failing an otherwise successful test run. Tests
+  still run once; Testmon warns and keeps the last known-good cache.
 - Select from literal per-test dependency snapshots: every test stores the
   exact checksum of each learned input, so an accepted run never refreshes a
   test it did not execute. `bin/rails test` and `bin/rails test:all` can share

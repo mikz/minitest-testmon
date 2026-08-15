@@ -90,12 +90,8 @@ module Minitest
           lib = File.expand_path("../..", __dir__)
           environment["RUBYOPT"] = [ENV["RUBYOPT"], "-I#{lib}", "-rminitest/testmon_plugin"].compact.join(" ")
         end
-        if rails_root
-          command = [File.join(rails_root, "bin/rails"), command.last]
-          pid = Process.spawn(environment, *command, chdir: rails_root)
-        else
-          pid = Process.spawn(environment, *command)
-        end
+        command = [File.join(rails_root, "bin/rails"), command.last] if rails_root
+        pid = spawn_command(environment, command, chdir: rails_root)
         Process.wait(pid)
         status = $?.exitstatus || 4
         store = Store.new(
@@ -109,14 +105,49 @@ module Minitest
         else
           report = nil
         end
-        if status.zero?
-          return 4 unless report
-
-          unpublished_reason = report.dig("publication", "reason")
-          return 4 if report.dig("publication", "published") == false &&
-            (full || %w[provider_incomplete worker_incomplete].include?(unpublished_reason))
+        if fallback_required?(status, report, full: full)
+          return fallback_test_command(command, chdir: rails_root, rubyopt: environment["RUBYOPT"])
         end
+
         status
+      end
+
+      def spawn_command(environment, command, chdir: nil)
+        options = chdir ? {chdir: chdir} : {}
+        Process.spawn(environment, *command, **options)
+      end
+
+      def fallback_required?(status, report, full:)
+        unpublished_reason = report&.dig("publication", "reason")
+        return false if unpublished_reason == "unsupported_parallelism"
+        return true if status == 4
+        return false unless status.zero?
+        return true unless report
+
+        report.dig("publication", "published") == false &&
+          (full || %w[provider_incomplete worker_incomplete].include?(unpublished_reason))
+      end
+
+      def fallback_test_command(command, chdir: nil, rubyopt: nil)
+        @err.puts "Testmon could not safely complete; rerunning without test selection."
+        environment = {
+          Environment::BYPASS_VARIABLE => "1",
+          "MINITEST_TESTMON" => "0",
+          "MINITEST_TESTMON_DB" => nil,
+          "MINITEST_TESTMON_RUN_ID" => nil,
+          "MINITEST_TESTMON_FULL" => nil,
+          "MINITEST_TESTMON_CONFIG" => nil,
+          "MINITEST_TESTMON_PROJECT_ROOT" => nil,
+          "MINITEST_TESTMON_RAILS_FLAG" => nil,
+          "MINITEST_TESTMON_RAILS_COMMAND" => nil
+        }
+        environment["RUBYOPT"] = rubyopt if rubyopt
+        pid = spawn_command(environment, command, chdir: chdir)
+        Process.wait(pid)
+        $?.exitstatus || 4
+      rescue SystemCallError => error
+        @err.puts "Testmon fallback failed: #{error.message}"
+        4
       end
 
       def valid_testmon_report?(report)

@@ -13,8 +13,9 @@ Every supported input follows the same model:
    artifacts for the current test.
 
 If an observation cannot be claimed or intentionally ignored, the provider is
-incomplete and testmon fails open. It does not invent an edge from an unknown
-path.
+incomplete. Testmon does not invent an edge from an unknown path. The wrapper
+preserves the rejected receipt, reruns the original command without Testmon
+selection, and returns the native command's status.
 
 ## Registration
 

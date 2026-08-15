@@ -211,4 +211,4 @@ module Minitest
   end
 end
 
-Minitest::Testmon.start_early_observation! if Minitest::Testmon::Environment.enabled?
+Minitest::Testmon.start_early_observation! if Minitest::Testmon::Environment.active?

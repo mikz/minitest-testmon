@@ -2,7 +2,7 @@
 
 require "minitest"
 require "minitest/testmon/environment"
-require "minitest/testmon" if Minitest::Testmon::Environment.enabled?
+require "minitest/testmon" if Minitest::Testmon::Environment.active?
 
 module Minitest
   register_plugin :testmon unless extensions.include?(:testmon) || extensions.include?("testmon")
@@ -16,7 +16,7 @@ module Minitest
       status = options.dig(:minitest_testmon_exit_state, :status)
       raise SystemExit.new(status) if status
     end
-    options[:testmon] ||= Minitest::Testmon::Environment.enabled?
+    options[:testmon] ||= Minitest::Testmon::Environment.active?
     parser.on("--testmon[=VALUE]", "Enable minitest-testmon") do |value|
       options[:testmon_explicit] = true
       if value
@@ -36,6 +36,8 @@ module Minitest
   end
 
   def self.plugin_testmon_init(options)
+    return if Minitest::Testmon::Environment.bypassed?
+
     reject_testmon_usage!(options)
     return unless options[:testmon]
     return if options[:minitest_testmon_initialized]

@@ -49,7 +49,8 @@ class AdversarialAcceptanceTest < Minitest::Test
         "ADVERSARIAL_BACKGROUND_BOUNDARY" => "1",
         "EXPECTED_BACKGROUND_TRIGGER" => "trigger-v2\n"
       })
-      refute result.success?, "unattributed background execution unexpectedly published"
+      assert result.success?, result.stderr
+      assert_match(/rerunning without test selection/, result.stderr)
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
         baseline,
         report,
@@ -186,9 +187,11 @@ class AdversarialAcceptanceTest < Minitest::Test
         project.remove("data/symlink.txt")
         File.symlink(fifo, project.path.join("data/symlink.txt"))
         writer_pid = Process.fork do
-          File.open(fifo, "w") do |file|
-            marker.write("read")
-            file.write("escaped\n")
+          2.times do
+            File.open(fifo, "w") do |file|
+              marker.write("read")
+              file.write("escaped\n")
+            end
           end
           exit! 0
         end
@@ -370,7 +373,8 @@ class AdversarialAcceptanceTest < Minitest::Test
         result = finish_spawned(run, timeout: RUN_DEADLINE)
         run[:pid] = nil
         refute result.timed_out, "#{kind} selection-gap run timed out"
-        refute result.success?, "#{kind} selection-gap mutation exited zero"
+        assert result.success?, result.stderr
+        assert_match(/rerunning without test selection/, result.stderr)
         report = driver.report(project)
         assert_report_contract report
         assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(

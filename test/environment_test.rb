@@ -18,4 +18,22 @@ class EnvironmentTest < TestmonTestCase
       refute Minitest::Testmon::Environment.enabled?(value), value.inspect
     end
   end
+
+  def test_bypass_disables_an_enabled_environment
+    previous_enabled = ENV["MINITEST_TESTMON"]
+    previous_bypass = ENV[Minitest::Testmon::Environment::BYPASS_VARIABLE]
+    ENV["MINITEST_TESTMON"] = "1"
+    ENV[Minitest::Testmon::Environment::BYPASS_VARIABLE] = "1"
+
+    assert Minitest::Testmon::Environment.enabled?
+    assert Minitest::Testmon::Environment.bypassed?
+    refute Minitest::Testmon::Environment.active?
+  ensure
+    previous_enabled ? ENV["MINITEST_TESTMON"] = previous_enabled : ENV.delete("MINITEST_TESTMON")
+    if previous_bypass
+      ENV[Minitest::Testmon::Environment::BYPASS_VARIABLE] = previous_bypass
+    else
+      ENV.delete(Minitest::Testmon::Environment::BYPASS_VARIABLE)
+    end
+  end
 end

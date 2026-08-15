@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Make wrapper execution fail open: incomplete or malformed Testmon evidence
+  causes the original test command to run again with Testmon bypassed, and the
+  wrapper returns that native command's status while preserving the rejected
+  Testmon receipt for diagnosis. Unsupported parallel execution remains an
+  explicit error and is not replayed.
 - Select from literal per-test dependency snapshots: every test stores the
   exact checksum of each learned input, so an accepted run never refreshes a
   test it did not execute. `bin/rails test` and `bin/rails test:all` can share

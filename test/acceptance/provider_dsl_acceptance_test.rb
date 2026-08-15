@@ -196,14 +196,14 @@ class ProviderDslAcceptanceTest < Minitest::Test
         "EXPECTED_RESOLVER" => "resolver-v2",
         "RESOLVER_EMPTY" => "1"
       })
-      refute empty_result.success?, "unclaimed resolver event unexpectedly published"
+      assert empty_result.success?, empty_result.stderr
       assert observation_items(empty_report, :uncovered).any? { |item| item.fetch("kind") == "resolver_loaded" }
 
       missing_result, missing_report = run_provider(project, extra_env: {
         "EXPECTED_RESOLVER" => "resolver-v2",
         "RESOLVER_MISSING_KEY" => "1"
       })
-      refute missing_result.success?, "undeclared resolver key unexpectedly published"
+      assert missing_result.success?, missing_result.stderr
       assert_equal "provider_incomplete", missing_report.dig("publication", "reason")
       assert_observation_reason missing_report, "claim_path_missing"
     end
@@ -233,7 +233,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
     with_provider_project do |project|
       baseline = learn_provider_baseline(project)
       result, report = run_provider(project, extra_env: {"MISSING_STARTUP_OBSERVER" => "1"})
-      refute result.success?, "missing observer target unexpectedly succeeded"
+      assert result.success?, result.stderr
       assert MinitestTestmonAcceptance::ProviderOracle.assert_full_run!(report)
       assert_equal "provider_incomplete", report.dig("publication", "reason")
       assert_observation_reason report, "observer_unavailable"
@@ -263,7 +263,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
   def test_outside_root_access_is_excluded_and_suggests_an_explicit_root
     with_provider_project do |project|
       result = driver.run(project, full: true, env: {"PROBE_SUGGESTIONS" => "1"})
-      refute result.success?, "outside-root/opaque discovery unexpectedly exited zero"
+      assert result.success?, result.stderr
       report = driver.report(project)
       assert_report_contract report
       assert_equal false, report.dig("publication", "published")
@@ -283,7 +283,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
     reports = 2.times.map do
       project = MinitestTestmonAcceptance::Project.copy_fixture("provider_dsl")
       result = driver.run(project, full: true, env: {"PROBE_SUGGESTIONS" => "1"})
-      refute result.success?, "suggestion discovery unexpectedly exited zero"
+      assert result.success?, result.stderr
       report = driver.report(project)
       assert_report_contract report
       assert_equal false, report.dig("publication", "published")
@@ -436,14 +436,14 @@ class ProviderDslAcceptanceTest < Minitest::Test
       project.write(mutation_path, mutation)
 
       first_result, first_report = run_provider(project, extra_env: expected_env.merge(failure_env))
-      refute first_result.success?, "#{reason} unexpectedly published"
+      assert first_result.success?, first_result.stderr
       assert_equal "provider_incomplete", first_report.dig("publication", "reason")
       assert_observation_reason first_report, reason
       assert MinitestTestmonAcceptance::ProviderOracle.assert_preserved_publication!(baseline, first_report)
 
       selected = first_report.dig("tests", "selected")
       repeated_result, repeated_report = run_provider(project, extra_env: expected_env.merge(failure_env))
-      refute repeated_result.success?, "repeated #{reason} unexpectedly published"
+      assert repeated_result.success?, repeated_result.stderr
       assert_equal selected, repeated_report.dig("tests", "selected")
       assert_equal selected, repeated_report.dig("tests", "executed")
       assert_observation_reason repeated_report, reason

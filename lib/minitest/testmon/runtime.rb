@@ -84,7 +84,7 @@ module Minitest
       end
 
       def infrastructure_failure!(reason)
-        @exit_state[:status] = 4
+        @exit_state[:status] = 4 unless supervised_publication_failure?(reason)
         reason
       end
 
@@ -140,6 +140,10 @@ module Minitest
       end
 
       private
+
+      def supervised_publication_failure?(reason)
+        ENV.key?("MINITEST_TESTMON_RUN_ID") && reason.to_s != "unsupported_parallelism"
+      end
 
       def choose_selection
         Selector.new.call(

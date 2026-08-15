@@ -233,6 +233,44 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
+  def test_incomplete_provider_evidence_runs_once_and_returns_native_status
+    with_project do |directory|
+      marker = File.join(directory, "executions.txt")
+      data = write_file(File.join(directory, "data.txt"), "value\n")
+      test_file = write_file(File.join(directory, "value_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+
+        class ValueTest < Minitest::Test
+          def test_direct_file_read
+            File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
+              file.puts "test"
+            end
+            assert_equal "value\n", File.read(#{data.dump})
+          end
+        end
+      RUBY
+
+      stdout, stderr, status = Open3.capture3(
+        {"EXECUTION_MARKER" => marker},
+        RbConfig.ruby,
+        EXECUTABLE,
+        "run", "--full", "--",
+        RbConfig.ruby,
+        test_file,
+        "--testmon",
+        chdir: directory
+      )
+
+      assert status.success?, [stdout, stderr].join("\n")
+      assert_match(/Testmon cache unchanged: evidence could not be safely published \(provider_incomplete\)/, stderr)
+      assert_equal ["test"], File.readlines(marker, chomp: true)
+      report = read_report(directory)
+      assert_equal false, report.dig("publication", "published")
+      assert_equal "provider_incomplete", report.dig("publication", "reason")
+      assert report.dig("observations", "unresolved", "items").any? { |item| item["reason"] == "opaque_c_call" }
+    end
+  end
+
   def test_full_suite_rails_wrapper_defers_plugin_loading_to_bundler
     with_project do |directory|
       marker = File.join(directory, "environment.json")
@@ -283,7 +321,8 @@ class CLIIntegrationTest < TestmonTestCase
             chdir: caller
           )
 
-          assert_equal 4, status.exitstatus, [stdout, stderr].join("\n")
+          assert status.success?, [stdout, stderr].join("\n")
+          assert_match(/Testmon cache unchanged: evidence could not be safely published/, stderr)
           refute File.exist?(File.join(caller, ".minitest-testmon.sqlite3"))
           refute File.exist?(File.join(caller, ".minitest-testmon.rb"))
           refute File.exist?(File.join(caller, "tmp/minitest-testmon/discovery.json"))
@@ -302,9 +341,14 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def test_zero_exit_with_a_malformed_run_receipt_fails_closed
+  def test_zero_exit_with_a_malformed_run_receipt_runs_once_and_returns_zero
     with_project do |directory|
+      marker = File.join(directory, "executions.txt")
       command = write_file(File.join(directory, "write_invalid_report.rb"), <<~RUBY)
+        File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
+          file.puts "test"
+        end
+
         require "sqlite3"
 
         database = SQLite3::Database.new(ENV.fetch("MINITEST_TESTMON_DB"))
@@ -315,7 +359,7 @@ class CLIIntegrationTest < TestmonTestCase
       RUBY
       ["not json", JSON.generate({"valid_json" => "not a Testmon report"})].each do |payload|
         stdout, stderr, status = Open3.capture3(
-          {"INVALID_REPORT" => payload},
+          {"INVALID_REPORT" => payload, "EXECUTION_MARKER" => marker},
           RbConfig.ruby,
           EXECUTABLE,
           "run",
@@ -325,8 +369,11 @@ class CLIIntegrationTest < TestmonTestCase
           chdir: directory
         )
 
-        assert_equal 4, status.exitstatus, [stdout, stderr].join("\n")
+        assert status.success?, [stdout, stderr].join("\n")
         assert_empty stdout
+        assert_match(/Testmon cache unchanged: evidence could not be safely published/, stderr)
+        assert_equal ["test"], File.readlines(marker, chomp: true)
+        FileUtils.rm_f(marker)
       end
     end
   end
@@ -346,11 +393,18 @@ class CLIIntegrationTest < TestmonTestCase
     assert cli.send(:valid_testmon_report?, incomplete)
   end
 
-  def test_forced_run_requires_its_exact_run_receipt
+  def test_missing_run_receipt_runs_once_and_returns_native_status
     with_project do |directory|
-      command = write_file(File.join(directory, "no_report.rb"), "# successful child without a report\n")
+      marker = File.join(directory, "executions.txt")
+      command = write_file(File.join(directory, "no_report.rb"), <<~RUBY)
+        File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
+          file.puts "test"
+        end
+        exit Integer(ENV.fetch("NATIVE_STATUS", "0"))
+      RUBY
 
       stdout, stderr, status = Open3.capture3(
+        {"EXECUTION_MARKER" => marker},
         RbConfig.ruby,
         EXECUTABLE,
         "run",
@@ -360,9 +414,25 @@ class CLIIntegrationTest < TestmonTestCase
         chdir: directory
       )
 
-      assert_equal 4, status.exitstatus, stderr
+      assert status.success?, stderr
       assert_empty stdout
+      assert_match(/Testmon cache unchanged: evidence could not be safely published/, stderr)
+      assert_equal ["test"], File.readlines(marker, chomp: true)
       refute File.exist?(File.join(directory, "tmp/minitest-testmon/discovery.json"))
+
+      FileUtils.rm_f(marker)
+      _stdout, _stderr, failed = Open3.capture3(
+        {"EXECUTION_MARKER" => marker, "NATIVE_STATUS" => "7"},
+        RbConfig.ruby,
+        EXECUTABLE,
+        "run",
+        "--full", "--",
+        RbConfig.ruby,
+        command,
+        chdir: directory
+      )
+      assert_equal 7, failed.exitstatus
+      assert_equal ["test"], File.readlines(marker, chomp: true)
     end
   end
 

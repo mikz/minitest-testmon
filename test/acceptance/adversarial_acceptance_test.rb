@@ -49,7 +49,7 @@ class AdversarialAcceptanceTest < Minitest::Test
         "ADVERSARIAL_BACKGROUND_BOUNDARY" => "1",
         "EXPECTED_BACKGROUND_TRIGGER" => "trigger-v2\n"
       })
-      refute result.success?, "unattributed background execution unexpectedly published"
+      assert result.success?, result.stderr
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
         baseline,
         report,
@@ -339,7 +339,8 @@ class AdversarialAcceptanceTest < Minitest::Test
       result, report = run_adversarial(project, env: mutation_env(kind).merge(
         "ADVERSARIAL_MUTATE_DURING" => kind
       ))
-      refute result.success?, "#{kind} mutation during test exited zero"
+      assert result.success?,
+        "#{kind} mutation did not preserve the successful test command status: #{result.stderr}"
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
         baseline,
         report,
@@ -370,7 +371,7 @@ class AdversarialAcceptanceTest < Minitest::Test
         result = finish_spawned(run, timeout: RUN_DEADLINE)
         run[:pid] = nil
         refute result.timed_out, "#{kind} selection-gap run timed out"
-        refute result.success?, "#{kind} selection-gap mutation exited zero"
+        assert result.success?, result.stderr
         report = driver.report(project)
         assert_report_contract report
         assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(

@@ -109,14 +109,17 @@ module Minitest
         else
           report = nil
         end
-        if status.zero?
-          return 4 unless report
+        warn_unpublished_report(report) if status.zero?
 
-          unpublished_reason = report.dig("publication", "reason")
-          return 4 if report.dig("publication", "published") == false &&
-            (full || %w[provider_incomplete worker_incomplete].include?(unpublished_reason))
-        end
         status
+      end
+
+      def warn_unpublished_report(report)
+        return if report&.dig("publication", "published")
+
+        reason = report&.dig("publication", "reason")
+        detail = reason ? " (#{reason})" : ""
+        @err.puts "Testmon cache unchanged: evidence could not be safely published#{detail}."
       end
 
       def valid_testmon_report?(report)

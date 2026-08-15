@@ -339,7 +339,8 @@ class AdversarialAcceptanceTest < Minitest::Test
       result, report = run_adversarial(project, env: mutation_env(kind).merge(
         "ADVERSARIAL_MUTATE_DURING" => kind
       ))
-      refute result.success?, "#{kind} mutation during test exited zero"
+      assert result.success?,
+        "#{kind} mutation did not preserve the successful test command status: #{result.stderr}"
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
         baseline,
         report,

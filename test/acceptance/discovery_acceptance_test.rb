@@ -25,10 +25,12 @@ class DiscoveryAcceptanceTest < Minitest::Test
     reports = 2.times.map do
       project = MinitestTestmonAcceptance::Project.copy_fixture("discovery")
       result = driver.run(project, full: true)
-      refute result.success?, "incomplete discovery unexpectedly exited zero"
+      assert result.success?,
+        "wrapper did not preserve the successful test command status: #{result.stderr}"
       report = driver.report(project)
       assert_equal false, report.fetch("ready")
       assert_equal false, report.dig("publication", "published")
+      assert_nil report.fetch("generation")
       report
     ensure
       project&.cleanup
@@ -121,7 +123,8 @@ class DiscoveryAcceptanceTest < Minitest::Test
   def with_discovery_report
     with_project("discovery") do |project|
       result = driver.run(project, full: true)
-      refute result.success?, "source-race/opaque discovery unexpectedly exited zero"
+      assert result.success?,
+        "wrapper did not preserve the successful test command status: #{result.stderr}"
       report = driver.report(project)
       assert_report_contract report
       assert_equal false, report.fetch("ready"),

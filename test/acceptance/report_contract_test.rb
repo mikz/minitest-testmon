@@ -10,7 +10,8 @@ class ReportContractTest < Minitest::Test
 
     with_project("discovery") do |project|
       result = driver.run(project, full: true)
-      refute result.success?, "incomplete discovery unexpectedly exited zero"
+      assert result.success?,
+        "wrapper did not preserve the successful test command status: #{result.stderr}"
 
       report = driver.report(project)
       assert_report_contract report

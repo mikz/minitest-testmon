@@ -59,7 +59,7 @@ class ActiveSupport::TestCase
       File.open(marker_path, "a") { |file| file.puts "#{Process.pid}:#{self.class}##{name}" }
     end
 
-    if ENV["MINITEST_TESTMON_BYPASS"] != "1" && ENV["RAILS_ACCEPTANCE_KILL_TEST"] == name
+    if ENV["RAILS_ACCEPTANCE_KILL_TEST"] == name
       Process.kill("KILL", Process.pid)
     end
 

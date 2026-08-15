@@ -233,7 +233,7 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def test_incomplete_provider_evidence_reruns_the_native_test_command
+  def test_incomplete_provider_evidence_runs_once_and_returns_native_status
     with_project do |directory|
       marker = File.join(directory, "executions.txt")
       data = write_file(File.join(directory, "data.txt"), "value\n")
@@ -243,7 +243,7 @@ class CLIIntegrationTest < TestmonTestCase
         class ValueTest < Minitest::Test
           def test_direct_file_read
             File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
-              file.puts(ENV["MINITEST_TESTMON_BYPASS"] == "1" ? "fallback" : "testmon")
+              file.puts "test"
             end
             assert_equal "value\n", File.read(#{data.dump})
           end
@@ -262,8 +262,8 @@ class CLIIntegrationTest < TestmonTestCase
       )
 
       assert status.success?, [stdout, stderr].join("\n")
-      assert_match(/Testmon could not safely complete; rerunning without test selection/, stderr)
-      assert_equal %w[testmon fallback], File.readlines(marker, chomp: true)
+      assert_match(/Testmon cache unchanged: evidence could not be safely published \(provider_incomplete\)/, stderr)
+      assert_equal ["test"], File.readlines(marker, chomp: true)
       report = read_report(directory)
       assert_equal false, report.dig("publication", "published")
       assert_equal "provider_incomplete", report.dig("publication", "reason")
@@ -278,8 +278,6 @@ class CLIIntegrationTest < TestmonTestCase
       rails = write_file(File.join(directory, "bin/rails"), <<~RUBY)
         #!/usr/bin/env ruby
         require "json"
-
-        exit 0 if ENV["MINITEST_TESTMON_BYPASS"] == "1"
 
         File.binwrite(ENV.fetch("WRAPPER_MARKER"), JSON.generate({
           rubyopt: ENV.fetch("RUBYOPT", "<unset>"),
@@ -324,7 +322,7 @@ class CLIIntegrationTest < TestmonTestCase
           )
 
           assert status.success?, [stdout, stderr].join("\n")
-          assert_match(/Testmon could not safely complete; rerunning without test selection/, stderr)
+          assert_match(/Testmon cache unchanged: evidence could not be safely published/, stderr)
           refute File.exist?(File.join(caller, ".minitest-testmon.sqlite3"))
           refute File.exist?(File.join(caller, ".minitest-testmon.rb"))
           refute File.exist?(File.join(caller, "tmp/minitest-testmon/discovery.json"))
@@ -343,14 +341,13 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
-  def test_zero_exit_with_a_malformed_run_receipt_reruns_without_testmon
+  def test_zero_exit_with_a_malformed_run_receipt_runs_once_and_returns_zero
     with_project do |directory|
       marker = File.join(directory, "executions.txt")
       command = write_file(File.join(directory, "write_invalid_report.rb"), <<~RUBY)
         File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
-          file.puts(ENV["MINITEST_TESTMON_BYPASS"] == "1" ? "fallback" : "testmon")
+          file.puts "test"
         end
-        exit 0 if ENV["MINITEST_TESTMON_BYPASS"] == "1"
 
         require "sqlite3"
 
@@ -374,8 +371,8 @@ class CLIIntegrationTest < TestmonTestCase
 
         assert status.success?, [stdout, stderr].join("\n")
         assert_empty stdout
-        assert_match(/Testmon could not safely complete; rerunning without test selection/, stderr)
-        assert_equal %w[testmon fallback], File.readlines(marker, chomp: true)
+        assert_match(/Testmon cache unchanged: evidence could not be safely published/, stderr)
+        assert_equal ["test"], File.readlines(marker, chomp: true)
         FileUtils.rm_f(marker)
       end
     end
@@ -394,21 +391,16 @@ class CLIIntegrationTest < TestmonTestCase
 
     incomplete = report.merge("complete" => false, "ready" => false, "diagnostics" => [])
     assert cli.send(:valid_testmon_report?, incomplete)
-
-    unsupported = incomplete.merge(
-      "publication" => {"published" => false, "reason" => "unsupported_parallelism"}
-    )
-    refute cli.send(:fallback_required?, 4, unsupported, full: true)
   end
 
-  def test_missing_run_receipt_reruns_without_testmon_and_returns_native_status
+  def test_missing_run_receipt_runs_once_and_returns_native_status
     with_project do |directory|
       marker = File.join(directory, "executions.txt")
       command = write_file(File.join(directory, "no_report.rb"), <<~RUBY)
         File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
-          file.puts(ENV["MINITEST_TESTMON_BYPASS"] == "1" ? "fallback" : "testmon")
+          file.puts "test"
         end
-        exit Integer(ENV.fetch("FALLBACK_STATUS", "0")) if ENV["MINITEST_TESTMON_BYPASS"] == "1"
+        exit Integer(ENV.fetch("NATIVE_STATUS", "0"))
       RUBY
 
       stdout, stderr, status = Open3.capture3(
@@ -424,13 +416,13 @@ class CLIIntegrationTest < TestmonTestCase
 
       assert status.success?, stderr
       assert_empty stdout
-      assert_match(/Testmon could not safely complete; rerunning without test selection/, stderr)
-      assert_equal %w[testmon fallback], File.readlines(marker, chomp: true)
+      assert_match(/Testmon cache unchanged: evidence could not be safely published/, stderr)
+      assert_equal ["test"], File.readlines(marker, chomp: true)
       refute File.exist?(File.join(directory, "tmp/minitest-testmon/discovery.json"))
 
       FileUtils.rm_f(marker)
       _stdout, _stderr, failed = Open3.capture3(
-        {"EXECUTION_MARKER" => marker, "FALLBACK_STATUS" => "7"},
+        {"EXECUTION_MARKER" => marker, "NATIVE_STATUS" => "7"},
         RbConfig.ruby,
         EXECUTABLE,
         "run",
@@ -440,7 +432,7 @@ class CLIIntegrationTest < TestmonTestCase
         chdir: directory
       )
       assert_equal 7, failed.exitstatus
-      assert_equal %w[testmon fallback], File.readlines(marker, chomp: true)
+      assert_equal ["test"], File.readlines(marker, chomp: true)
     end
   end
 

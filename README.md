@@ -97,15 +97,13 @@ without starting the runtime.
 
 The first successful run stores one dependency snapshot per passing test. Each
 snapshot contains the exact checksum of every input learned for that test. A
-later run with no relevant change executes no tests. The wrapper returns the
-selected run's native status when Testmon evidence is accepted. If Testmon
-evidence or infrastructure is incomplete, it preserves the rejected receipt,
-reruns the original command with test selection bypassed, and returns that
-native command's status. Exit 2 remains invalid CLI usage, exit 3 means the
-wrapper could not acquire its cache lease, and exit 4 means the native fallback
-could not be started or the requested parallel execution mode is unsupported.
-Unsupported parallel execution is rejected before tests and is not replayed.
-Direct plugin activation cannot supervise a fallback and still reports
+later run with no relevant change executes no tests. The wrapper executes the
+test command once and returns its native status. If Testmon cannot safely
+publish evidence after a successful command, it leaves the cache unchanged and
+prints a warning instead of replacing the native status with exit 4. Exit 2 is
+invalid CLI usage, exit 3 means another process holds the cache lease, and exit
+4 remains reserved for unsupported invocation or infrastructure errors that
+prevent the test command from completing. Direct plugin activation reports
 incomplete evidence or lease contention as exit 4. To inspect why a path selects
 tests:
 
@@ -143,9 +141,9 @@ configuration and state there, runs the child from that root, and lets Bundler
 plus the Railtie activate observers at `before_configuration`. Other command
 shapes are rejected with exit 2 before spawn when either the configured project
 or a child-command token identifies a Rails application. The generic preload
-path is for non-Rails projects only. A child that produces no valid completed
-run receipt is rerun with Testmon bypassed; the invalid attempt remains visible
-through `report` and `runs`.
+path is for non-Rails projects only. A successful child that produces no valid
+completed run receipt leaves the cache unchanged, emits a warning, and still
+returns zero.
 
 The wrapper rejects inherited `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` before
 spawn. The child plugin repeats that check after Rails boot so configuration or

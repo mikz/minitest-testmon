@@ -90,9 +90,8 @@ class StorageAcceptanceTest < Minitest::Test
 
         wait_until("first runner did not enter lease barrier") { ready.file? }
         loser = driver.run(project)
-        assert loser.success?, loser.stderr
+        refute loser.success?, "concurrent lease loser waited or exited zero"
         assert_includes loser.stderr, "cache_lease_unavailable"
-        assert_includes loser.stderr, "rerunning without test selection"
         assert_equal baseline, driver.report(project),
           "lease loser replaced the last completed receipt"
 
@@ -140,9 +139,8 @@ class StorageAcceptanceTest < Minitest::Test
         wait_until("active SQLite owner never reached test barrier") { ready.file? }
 
         busy = driver.run(project)
-        assert busy.success?, busy.stderr
+        refute busy.success?, "second runner waited for or stole the active SQLite owner"
         assert_includes busy.stderr, "cache_lease_unavailable"
-        assert_includes busy.stderr, "rerunning without test selection"
         assert_equal baseline, driver.report(project),
           "busy runner replaced the last completed receipt"
         assert_equal before_quarantine,

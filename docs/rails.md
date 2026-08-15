@@ -91,9 +91,9 @@ because Rails can treat `PATH` as a test path. The option requires activation
 through `MINITEST_TESTMON` or `--testmon`. Invalid configuration also exits 2.
 Direct plugin activation exits 4 for incomplete evidence, an unavailable
 observer, a worker protocol failure, or cache contention. The wrapper instead
-reruns the complete Rails command with Testmon bypassed and returns that native
-command's status. Unsupported parallel execution remains an explicit exit 4
-and is not replayed. Ordinary Minitest failures keep exit 1.
+runs the complete Rails command once and preserves its native status when
+post-test evidence cannot be published. Unsupported parallel execution remains
+an explicit exit 4. Ordinary Minitest failures keep exit 1.
 
 Plain `bin/rails test --help` is intentionally inert and cannot advertise
 Testmon. `MINITEST_TESTMON=1 bin/rails test --help` (or
@@ -119,9 +119,9 @@ and spawns Rails with that working directory. It deliberately omits the generic
 keeps custom TracePoint targets defined by configuration visible before the
 application body runs. Other command shapes are rejected with exit 2 before
 spawn when the configured root or a child token identifies a Rails application;
-generic wrapper preloading is reserved for non-Rails projects. A child without
-a fresh valid Testmon report is rerun with Testmon bypassed; the wrapper returns
-the fallback command's native status.
+generic wrapper preloading is reserved for non-Rails projects. A successful
+child without a fresh valid Testmon report leaves the cache unchanged, emits a
+warning, and returns zero.
 
 Inherited `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` are rejected before wrapper
 spawn. The Rails child checks them again after boot, covering changes made by

@@ -15,8 +15,6 @@ module Minitest
       module_function
 
       def preload(arguments, application_root:)
-        return false if Environment.bypassed?
-
         argv = Array(arguments).map(&:to_s)
         # Auxiliary options must load the plugin so it can report a usage
         # error, but they do not activate Testmon and therefore must not enter
@@ -33,8 +31,6 @@ module Minitest
       end
 
       def call(arguments, application_root:, test_command:, rake_test_prepare:)
-        return false if Environment.bypassed?
-
         argv = Array(arguments).map(&:to_s)
         option_request = argv.any? { |argument| argument.start_with?("--testmon") }
         environment_request = Environment.enabled?
@@ -68,9 +64,8 @@ module Minitest
       end
 
       def requested?(arguments)
-        !Environment.bypassed? && (Environment.enabled? ||
+        Environment.enabled? ||
           Array(arguments).any? { |argument| argument.to_s.start_with?("--testmon") }
-                                  )
       end
 
       def rake_test_prepare?

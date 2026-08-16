@@ -606,7 +606,7 @@ class RailsBootstrapTest < TestmonTestCase
     end
   end
 
-  def test_direct_flag_uses_exit_four_for_incomplete_provider_evidence
+  def test_direct_flag_preserves_native_status_for_incomplete_provider_evidence
     with_project do |project|
       write_file(File.join(project, "inputs/value.yml"), "value: one\n")
       write_file(File.join(project, ".minitest-testmon.rb"), <<~RUBY)
@@ -630,7 +630,8 @@ class RailsBootstrapTest < TestmonTestCase
 
       _stdout, stderr, status = invoke_direct_testmon(project, "pass")
 
-      assert_equal 4, status.exitstatus, stderr
+      assert_equal 0, status.exitstatus, stderr
+      assert_match(/Testmon cache unchanged.*provider_incomplete/, stderr)
       report = read_report(project)
       assert_equal false, report.dig("publication", "published")
       assert_equal "provider_incomplete", report.dig("publication", "reason")

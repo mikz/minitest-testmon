@@ -84,7 +84,11 @@ module Minitest
       end
 
       def infrastructure_failure!(reason)
-        @exit_state[:status] = 4 unless supervised_publication_failure?(reason)
+        if reason.to_s == "unsupported_parallelism"
+          @exit_state[:status] = 4
+        elsif !supervised?
+          warn "Testmon cache unchanged: evidence could not be safely published (#{reason})."
+        end
         reason
       end
 
@@ -141,8 +145,8 @@ module Minitest
 
       private
 
-      def supervised_publication_failure?(reason)
-        ENV.key?("MINITEST_TESTMON_RUN_ID") && reason.to_s != "unsupported_parallelism"
+      def supervised?
+        ENV.key?("MINITEST_TESTMON_RUN_ID")
       end
 
       def choose_selection

@@ -125,6 +125,10 @@ class CoreObserverTest < TestmonTestCase
         observe_files: false,
         boundary_tracker: Struct.new(:boundary_active?).new(false)
       ).start
+      target = RubyVM::InstructionSequence.of(TestmonPreloadedTarget.method(:call))
+
+      assert observer.instance_variable_get(:@target_traces).key?(target),
+        "target trace did not retain its instruction sequence"
 
       Minitest::Testmon::ExecutionContext.with_test("TargetTest#test_call") do
         TestmonPreloadedTarget.call

@@ -110,6 +110,10 @@ module Minitest
         locator = ruby_locator(event.path)
         return unless locator
 
+        record_unattributed_execution(event, locator)
+      end
+
+      def record_unattributed_execution(event, locator)
         key = [Thread.current.object_id, locator.absolute_path]
         return if @unattributed_execution[key]
         @unattributed_execution[key] = true
@@ -131,6 +135,9 @@ module Minitest
         path = iseq.absolute_path || iseq.path
         locator = ruby_locator(path)
         return unless locator
+        if @test_only && ExecutionContext.current_test.nil? && @boundary_tracker&.boundary_active?
+          record_unattributed_execution(event, locator)
+        end
         install_target(iseq)
         pending_load = @pending_loads.delete(Thread.current)
         operation = pending_load ? :load : :script_compiled
@@ -405,11 +412,11 @@ module Minitest
         return if iseq.respond_to?(:trace_points) && iseq.trace_points.empty?
         return if @unhookable_ruby_paths.key?(target_source_path(iseq))
         @target_traces ||= {}
-        return if @target_traces.key?(iseq.object_id)
+        return if @target_traces.key?(iseq)
 
         trace = TracePoint.new(*RUBY_TARGET_TRACE_EVENTS) { |event| observe(event) }
         trace.enable(target: iseq)
-        @target_traces[iseq.object_id] = trace
+        @target_traces[iseq] = trace
       rescue ArgumentError, RuntimeError => error
         trace&.disable
         @session.startup_incomplete(:trace_capability_changed) if @session.respond_to?(:startup_incomplete)

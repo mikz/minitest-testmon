@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Exclude repository-local dependency Ruby under paths such as `vendor/bundle`
+  from both inventory and runtime evidence, including opaque file reads, so
+  serial and process-parallel Rails runs can publish complete evidence.
 - Prevent Testmon problems from failing an otherwise successful test run. Tests
   still run once; Testmon warns and keeps the last known-good cache.
 - Select from literal per-test dependency snapshots: every test stores the

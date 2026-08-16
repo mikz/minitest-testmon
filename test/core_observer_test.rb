@@ -209,6 +209,43 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
+  def test_early_observation_ignores_excluded_ruby_and_its_opaque_file_reads
+    with_project do |project|
+      data = write_file(File.join(project, "data.txt"), "value")
+      application = write_file(File.join(project, "app/reader.rb"), "File.read(#{data.dump})\n")
+      dependency = write_file(
+        File.join(project, "vendor/bundle/ruby/4.0.0/gems/example/lib/example.rb"),
+        "File.read(#{data.dump})\n"
+      )
+      dependency_link = File.join(project, "lib/example.rb")
+      FileUtils.mkdir_p(File.dirname(dependency_link))
+      File.symlink(dependency, dependency_link)
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      resolver = Minitest::Testmon::PathResolver.new(project: project)
+      session = RecordingSession.new
+      observer = Minitest::Testmon::CoreObserver.new(
+        session,
+        resolver: resolver,
+        ruby_path_policy: Minitest::Testmon::RubyPathPolicy.new(configuration)
+      ).start
+
+      load dependency_link
+      load application
+      observer.close
+
+      dependency_paths = [File.realpath(dependency), resolver.resolve(dependency).key]
+      dependency_observed = session.observations.any? do |observation|
+        dependency_paths.include?(observation.path) || dependency_paths.include?(observation.callsite&.fetch(:path))
+      end
+      refute dependency_observed, session.observations.map(&:report_item)
+      application_paths = [File.realpath(application), resolver.resolve(application).key]
+      application_observed = session.observations.any? do |observation|
+        application_paths.include?(observation.path) || application_paths.include?(observation.callsite&.fetch(:path))
+      end
+      assert application_observed
+    end
+  end
+
   def test_unhookable_source_is_presealed_suite_scoped_and_never_raises
     with_project do |project|
       script = write_file(File.join(project, "lib", "unhookable.rb"), <<~RUBY)

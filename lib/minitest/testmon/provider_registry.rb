@@ -403,11 +403,12 @@ module Minitest
           # make evidence collected before its observer started complete.
           claims.incomplete(:late_activation) if observation.reason == :late_activation
           candidate_path = observation.details["candidate_path"] || observation.details[:candidate_path]
-          if observation.reason == :opaque_c_call && candidate_path
-            candidate = observation.with(path: candidate_path, reason: nil)
+          callsite_path = observation.callsite && (observation.callsite["path"] || observation.callsite[:path])
+          if observation.reason == :opaque_c_call && (candidate_path || callsite_path)
+            candidate = candidate_path ? observation.with(path: candidate_path, reason: nil) : observation
             ignored = snapshot.registrations.any? do |registration|
               registration.provider.respond_to?(:ignore_observation) &&
-                registration.provider.ignore_observation(candidate, claims, any_kind: true)
+                registration.provider.ignore_observation(candidate, claims)
             end
             next if ignored
           end

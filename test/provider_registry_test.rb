@@ -270,6 +270,68 @@ class ProviderRegistryTest < TestmonTestCase
     assert_equal :observer_error, report.observations.fetch(0).reason
   end
 
+  def test_non_ruby_project_callsite_does_not_hide_opaque_file_evidence
+    with_project do |project|
+      rakefile = write_file(File.join(project, "Rakefile"), "File.read(\"config/settings.yml\")\n")
+      write_file(File.join(project, "config/settings.yml"), "value: one\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+      session.record(Minitest::Testmon::Observation.build(
+        kind: :file_read,
+        operation: :read,
+        test_id: "RakeTaskTest#test_task",
+        callsite: {path: rakefile, line: 1},
+        reason: :opaque_c_call
+      ))
+
+      report = session.finalize
+
+      refute report.complete?
+      assert_equal :opaque_c_call, report.observations.fetch(0).reason
+    end
+  end
+
+  def test_pathless_opaque_evidence_cannot_be_ignored_as_outside_project
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+      session.record(Minitest::Testmon::Observation.build(
+        kind: :file_read,
+        operation: :read,
+        test_id: "OpaqueTest#test_read",
+        reason: :opaque_c_call
+      ))
+
+      report = session.finalize
+
+      refute report.complete?
+      assert_equal :opaque_c_call, report.observations.fetch(0).reason
+    end
+  end
+
+  def test_ruby_source_inventory_matches_a_canonical_symlinked_base
+    with_project do |project|
+      source = write_file(File.join(project, "real/lib/example.rb"), "EXAMPLE = 1\n")
+      File.symlink("real", File.join(project, "src"))
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :sources, version: 1 do
+        inventory :ruby, root: :project, base: "src", include: "**/*.rb"
+        facet :source, inventory: :ruby, digest: :ruby_source, granularity: :file
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+
+      assert snapshot.current_inputs.any? { |input|
+        input.relative_path == "real/lib/example.rb" && input.facet == "ruby_source"
+      }
+      assert snapshot.source_stable?
+
+      File.binwrite(source, "EXAMPLE = 2\n")
+      refute snapshot.source_stable?
+    end
+  end
+
   def test_snapshot_digest_detects_content_and_membership_drift
     with_project do |project|
       first = write_file(File.join(project, "catalog", "one.txt"), "one")

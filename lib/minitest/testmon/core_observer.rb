@@ -18,6 +18,7 @@ module Minitest
         resolver:,
         allowed_roots: [:project],
         ruby_paths: nil,
+        ruby_path_policy: nil,
         unhookable_ruby_paths: [],
         test_only: false,
         observe_files: true,
@@ -29,6 +30,7 @@ module Minitest
         @ruby_locator_cache = {}
         @ruby_path_allowance = {}
         @ruby_paths = index_ruby_paths(ruby_paths) if ruby_paths
+        @ruby_path_policy = ruby_path_policy
         @unhookable_ruby_paths = Array(unhookable_ruby_paths).to_h do |path|
           [File.expand_path(path), true]
         end.freeze
@@ -343,6 +345,7 @@ module Minitest
       end
 
       def ruby_locator(path)
+        return @ruby_path_policy.locator(path) if @ruby_path_policy
         return project_locator(path) unless @ruby_paths
         return unless path.respond_to?(:to_path) || path.respond_to?(:to_str)
         path = path.to_path if path.respond_to?(:to_path)

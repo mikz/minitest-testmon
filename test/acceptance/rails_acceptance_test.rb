@@ -80,6 +80,47 @@ class RailsAcceptanceTest < Minitest::Test
     MinitestTestmonAcceptance::RailsOracle.assert_equivalent!(reports)
   end
 
+  def test_repo_local_vendor_bundle_is_ignored_with_serial_and_process_workers
+    reports = [1, 2].map do |workers|
+      with_rails_project(workers:) do |project, runtime|
+        vendored_prefix = "vendor/bundle/ruby/4.0.0/gems/example"
+        project.write("#{vendored_prefix}/data/value.txt", "42\n")
+        project.write("#{vendored_prefix}/lib/vendor_value.rb", <<~RUBY)
+          module VendorValue
+            module_function
+
+            def call
+              Integer(File.read(File.expand_path("../data/value.txt", __dir__)))
+            end
+          end
+        RUBY
+        original = project.read("test/unrelated_test.rb")
+        project.write("test/unrelated_test.rb", original.sub(
+          "assert_equal 4, 2 + 2",
+          <<~RUBY.strip
+            require Rails.root.join("#{vendored_prefix}/lib/vendor_value").to_s
+                assert_equal 42, VendorValue.call
+          RUBY
+        ))
+
+        cold = learn_rails_baseline(project, runtime)
+        assert_vendor_bundle_absent cold, vendored_prefix
+
+        warm_result, warm = run_rails(project, runtime)
+        assert warm_result.success?, rails_failure("workers=#{workers} vendor warm run", warm_result)
+        assert_equal true, warm.dig("publication", "published")
+        MinitestTestmonAcceptance::RailsOracle.assert_warm_zero!(warm)
+        assert_vendor_bundle_absent warm, vendored_prefix
+        workers_root = project.path.join("tmp/minitest-testmon/workers")
+        refute workers_root.exist? && workers_root.glob("**/*").any?(&:file?),
+          "workers=#{workers} left Testmon worker evidence behind"
+        cold
+      end
+    end
+
+    MinitestTestmonAcceptance::RailsOracle.assert_equivalent!(reports)
+  end
+
   def test_explicit_parallelize_me_uses_active_rails_process_workers
     with_rails_project(workers: 2) do |project, runtime|
       marker = project.path.join("tmp/process-parallel-test-marker")
@@ -412,6 +453,18 @@ class RailsAcceptanceTest < Minitest::Test
   def assert_not_selected(report, fragment)
     test_id = find_test_id(report, fragment)
     refute_includes report.dig("tests", "selected"), test_id
+  end
+
+  def assert_vendor_bundle_absent(report, prefix)
+    inventory_paths = report.fetch("inventory").values.flat_map { |category| category.fetch("items") }
+      .filter_map { |item| item["path"] }
+    observation_paths = report.fetch("observations").values.flat_map { |category| category.fetch("items") }
+      .flat_map { |item| [item["path"], item.dig("callsite", "path")] }
+      .compact
+    logical_prefix = "project:#{prefix}/"
+
+    assert_empty inventory_paths.grep(/^#{Regexp.escape(logical_prefix)}/)
+    assert_empty observation_paths.grep(/^#{Regexp.escape(logical_prefix)}/)
   end
 
   def assert_provider_claim(report, provider:, path_suffix: nil, facet: nil)

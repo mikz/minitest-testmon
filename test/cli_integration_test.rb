@@ -235,7 +235,7 @@ class CLIIntegrationTest < TestmonTestCase
 
   def test_incomplete_provider_evidence_runs_once_and_returns_native_status
     with_project do |directory|
-      marker = File.join(directory, "executions.txt")
+      marker = "#{directory}-executions.txt"
       data = write_file(File.join(directory, "data.txt"), "value\n")
       test_file = write_file(File.join(directory, "value_test.rb"), <<~RUBY)
         require "minitest/autorun"
@@ -245,13 +245,88 @@ class CLIIntegrationTest < TestmonTestCase
             File.open(ENV.fetch("EXECUTION_MARKER"), "a") do |file|
               file.puts "test"
             end
-            assert_equal "value\n", File.read(#{data.dump})
+            if ENV["INCOMPLETE_PROVIDER"] == "1"
+              assert_equal "value\n", File.read(#{data.dump})
+            else
+              pass
+            end
+          end
+        end
+      RUBY
+
+      invoke = lambda do |incomplete: false|
+        environment = {"EXECUTION_MARKER" => marker}
+        environment["INCOMPLETE_PROVIDER"] = "1" if incomplete
+        Open3.capture3(
+          environment,
+          RbConfig.ruby,
+          EXECUTABLE,
+          "run", "--full", "--",
+          RbConfig.ruby,
+          test_file,
+          "--testmon",
+          chdir: directory
+        )
+      end
+
+      baseline_stdout, baseline_stderr, baseline_status = invoke.call
+      assert baseline_status.success?, [baseline_stdout, baseline_stderr].join("\n")
+      baseline = read_report(directory)
+      assert_equal true, baseline.dig("publication", "published")
+      baseline_generation = baseline.fetch("generation")
+
+      stdout, stderr, status = invoke.call(incomplete: true)
+
+      assert status.success?, [stdout, stderr].join("\n")
+      assert_match(/Testmon cache unchanged: evidence could not be safely published \(provider_incomplete\)/, stderr)
+      report = read_report(directory)
+      assert_equal false, report.dig("publication", "published")
+      assert_equal "provider_incomplete", report.dig("publication", "reason")
+      assert_equal baseline_generation, report.fetch("generation")
+      assert report.dig("observations", "unresolved", "items").any? { |item| item["reason"] == "opaque_c_call" }
+
+      recovery_stdout, recovery_stderr, recovery_status = invoke.call
+      assert recovery_status.success?, [recovery_stdout, recovery_stderr].join("\n")
+      recovery = read_report(directory)
+      assert_equal true, recovery.dig("publication", "published")
+      assert_equal baseline_generation + 1, recovery.fetch("generation")
+      assert_equal ["test", "test", "test"], File.readlines(marker, chomp: true)
+    ensure
+      FileUtils.rm_f(marker) if marker
+    end
+  end
+
+  def test_repo_local_vendor_bundle_ruby_does_not_poison_publication
+    with_project do |directory|
+      vendored_relative_path = "vendor/bundle/ruby/4.0.0/gems/example/lib/vendor_value.rb"
+      vendored_payload = write_file(
+        File.join(directory, "vendor/bundle/ruby/4.0.0/gems/example/data/value.txt"),
+        "42\n"
+      )
+      vendored_path = write_file(File.join(directory, vendored_relative_path), <<~RUBY)
+        module VendorValue
+          module_function
+
+          def call
+            Integer(File.read(#{vendored_payload.dump}))
+          end
+        end
+      RUBY
+      dependency_link = File.join(directory, "lib/vendor_value.rb")
+      FileUtils.mkdir_p(File.dirname(dependency_link))
+      File.symlink(vendored_path, dependency_link)
+      test_file = write_file(File.join(directory, "test/value_test.rb"), <<~RUBY)
+        require "minitest/autorun"
+
+        class ValueTest < Minitest::Test
+          def test_vendored_value
+            require #{dependency_link.dump}
+            assert_equal 42, VendorValue.call
           end
         end
       RUBY
 
       stdout, stderr, status = Open3.capture3(
-        {"EXECUTION_MARKER" => marker},
         RbConfig.ruby,
         EXECUTABLE,
         "run", "--full", "--",
@@ -261,13 +336,35 @@ class CLIIntegrationTest < TestmonTestCase
         chdir: directory
       )
 
-      assert status.success?, [stdout, stderr].join("\n")
-      assert_match(/Testmon cache unchanged: evidence could not be safely published \(provider_incomplete\)/, stderr)
-      assert_equal ["test"], File.readlines(marker, chomp: true)
       report = read_report(directory)
-      assert_equal false, report.dig("publication", "published")
-      assert_equal "provider_incomplete", report.dig("publication", "reason")
-      assert report.dig("observations", "unresolved", "items").any? { |item| item["reason"] == "opaque_c_call" }
+      inventory_paths = report.fetch("inventory").values.flat_map { |category| category.fetch("items") }
+        .filter_map { |item| item["path"] }
+      fatal_observation_paths = %w[uncovered unresolved].flat_map do |category|
+        report.dig("observations", category, "items")
+      end
+        .flat_map { |item| [item["path"], item.dig("callsite", "path")] }
+        .compact
+      ignored_observations = report.dig("observations", "ignored", "items")
+      vendored_logical_path = "project:#{vendored_relative_path}"
+
+      assert_equal({
+        native_success: true,
+        executed_tests: ["ValueTest#test_vendored_value"],
+        present_in_inventory: false,
+        present_in_fatal_observations: false,
+        ignored_dependency_read: true,
+        publication: {"published" => true, "reason" => nil}
+      }, {
+        native_success: status.success?,
+        executed_tests: report.dig("tests", "executed"),
+        present_in_inventory: inventory_paths.include?(vendored_logical_path),
+        present_in_fatal_observations: fatal_observation_paths.include?(vendored_logical_path),
+        ignored_dependency_read: ignored_observations.any? do |item|
+          item.fetch("reason") == "user_ignored" &&
+            item.dig("callsite", "path") == vendored_logical_path
+        end,
+        publication: report.fetch("publication")
+      }, [stdout, stderr, JSON.pretty_generate(report)].join("\n"))
     end
   end
 

@@ -140,6 +140,7 @@ module Minitest
           next unless File.file?(expanded)
           locator = @resolver.resolve(expanded, allow_missing: false)
           next unless locator.root == inventory.root
+          next if ruby_source_inventory?(inventory.name) && !inventory_matches_locator?(inventory.name, locator)
           locator
         rescue PathError
           nil
@@ -155,8 +156,17 @@ module Minitest
         excluded = inventory.exclude_patterns.flat_map do |pattern|
           Dir.glob(File.join(base, pattern), File::FNM_DOTMATCH)
         end.map { |path| File.expand_path(path) }.to_h { |path| [path, true] }
+        eligible_locator_keys = locators.map(&:key).to_h { |key| [key, true] }
         entries = lexical_paths.reject { |path| excluded.key?(File.expand_path(path)) }
           .reject { |path| File.directory?(path) }
+          .reject do |path|
+            next false unless ruby_source_inventory?(inventory.name)
+
+            locator = @resolver.resolve(path, allow_missing: false)
+            !eligible_locator_keys.key?(locator.key)
+          rescue PathError
+            true
+          end
           .map do |path|
           stat = File.lstat(path)
           regular = File.file?(path)
@@ -375,15 +385,21 @@ module Minitest
         inventory = definition.inventories.find { |item| item.name == inventory_name }
         return false unless inventory && locator.root == inventory.root
         root = @resolver.root(inventory.root)
-        base = File.expand_path(inventory.base, root)
+        base = @resolver.resolve(File.expand_path(inventory.base, root)).absolute_path
         relative = Pathname(locator.absolute_path).relative_path_from(Pathname(base)).to_s
         return false if relative == ".." || relative.start_with?("..#{File::SEPARATOR}")
-        flags = File::FNM_PATHNAME | File::FNM_EXTGLOB
+        flags = File::FNM_PATHNAME | File::FNM_EXTGLOB | File::FNM_DOTMATCH
         included = inventory.include_patterns.any? { |pattern| File.fnmatch?(pattern, relative, flags) }
         excluded = inventory.exclude_patterns.any? { |pattern| File.fnmatch?(pattern, relative, flags) }
         included && !excluded
-      rescue ArgumentError
+      rescue PathError, ArgumentError
         false
+      end
+
+      def ruby_source_inventory?(inventory_name)
+        definition.facets.any? do |facet|
+          facet.inventory == inventory_name && facet.digest == :ruby_source
+        end
       end
 
       def matching_file_artifacts(candidates, locator)

@@ -12,6 +12,7 @@ require_relative "testmon/object_identity"
 require_relative "testmon/provider_definition"
 require_relative "testmon/configuration"
 require_relative "testmon/path_resolver"
+require_relative "testmon/ruby_path_policy"
 require_relative "testmon/fingerprint"
 require_relative "testmon/input"
 require_relative "testmon/test_snapshot"
@@ -190,7 +191,11 @@ module Minitest
 
       def build_early_observer(configuration)
         resolver = PathResolver.new(configuration.roots)
-        handles = [CoreObserver.new(@early_buffer, resolver: resolver).start]
+        handles = [CoreObserver.new(
+          @early_buffer,
+          resolver: resolver,
+          ruby_path_policy: RubyPathPolicy.new(configuration)
+        ).start]
         configuration.providers.each do |definition|
           next if definition.name == :ruby
 

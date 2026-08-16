@@ -6,20 +6,13 @@ module Minitest
     # Its only privileged primitive is Coverage, which emits ordinary
     # +coverage_lines+ observations into these claims.
     class CoreProvider
-      EXCLUDES = %w[
-        .git/**/*
-        tmp/**/*
-        vendor/**/*
-        coverage/**/*
-        node_modules/**/*
-        log/**/*
-        .minitest-testmon.sqlite3*
-      ].freeze
+      EXCLUDES = RubyPathPolicy::DEFAULT_EXCLUDES
       INSTANCE_READS = %i[read readpartial sysread each_line gets readline readlines].freeze
       DIRECT_READS = %i[read binread readlines foreach].freeze
 
       def initialize(configuration)
         @configuration = configuration
+        @ruby_path_policy = RubyPathPolicy.new(configuration)
       end
 
       def define(builder)
@@ -34,13 +27,13 @@ module Minitest
 
       def define_ruby_inventories(builder)
         facets = []
-        @configuration.ruby_patterns.group_by(&:first).sort_by { |root, _| root.to_s }.each do |root, entries|
+        @configuration.ruby_patterns.group_by(&:first).sort_by { |root, _| root.to_s }.each do |root, _entries|
           inventory_name = :"ruby_#{root}"
           source_name = :"ruby_#{root}_source"
           paths_name = :"ruby_#{root}_paths"
           builder.inventory inventory_name,
             root: root,
-            include: (entries.map(&:last) + ((root.to_sym == :project) ? ["**/*.rb"] : [])).uniq.sort,
+            include: @ruby_path_policy.include_patterns(root),
             exclude: inventory_excludes(root)
           builder.facet source_name,
             inventory: inventory_name,
@@ -92,13 +85,7 @@ module Minitest
       end
 
       def inventory_excludes(root)
-        return EXCLUDES unless root.to_sym == :project
-
-        project_root = @configuration.roots.fetch(:project)
-        return EXCLUDES unless Testmon::GEM_ROOT.start_with?("#{project_root}#{File::SEPARATOR}")
-
-        relative = Pathname(Testmon::GEM_ROOT).relative_path_from(Pathname(project_root))
-        [*EXCLUDES, "#{relative}/**/*"].freeze
+        @ruby_path_policy.exclude_patterns(root)
       end
 
       def default_project_inputs?
@@ -179,24 +166,11 @@ module Minitest
       end
 
       def ruby_path(path)
-        value = input_path(path)
-        return unless value&.end_with?(".rb")
-        return value if contained_by_root?(value, @configuration.roots[:project])
-
-        @configuration.ruby_patterns.each do |root_name, pattern|
-          root = @configuration.roots[root_name]
-          next unless contained_by_root?(value, root)
-          relative = Pathname(value).relative_path_from(Pathname(root)).to_s
-          return value if File.fnmatch?(pattern, relative, File::FNM_PATHNAME | File::FNM_EXTGLOB)
-        end
-        nil
-      rescue ArgumentError
-        nil
+        @ruby_path_policy.locator(path)&.absolute_path
       end
 
       def project_path(path)
-        value = input_path(path)
-        value if contained_by_root?(value, @configuration.roots[:project])
+        @ruby_path_policy.project_locator(path)&.absolute_path
       end
 
       def contained_by_root?(path, root)

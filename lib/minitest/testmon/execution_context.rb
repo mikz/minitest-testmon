@@ -105,6 +105,15 @@ module Minitest
         token.unregister(thread) if borrowed
       end
 
+      def with_boundary_attribution
+        token = sole_active_attribution
+        if token && current_test.nil?
+          with_borrowed_attribution(token) { yield }
+        else
+          yield
+        end
+      end
+
       def set(test_id, thread_sources: nil)
         clear
         token = AttributionToken.new(test_id, thread_sources:)

@@ -193,6 +193,10 @@ Attribution inside a system test relies on an explicit operating assumption:
   for the duration of the request, so app code, template renders,
   translations, and asset resolutions triggered by a page load are claimed by
   the visiting test rather than left unattributed.
+- Puma loads application configuration on the server-startup thread before
+  handling requests. Testmon borrows the same token only while Puma loads and
+  finalizes that configuration, including its mode hooks. A configuration
+  operation still in flight when the test ends blocks publication.
 
 The stamp is strictly per-request and borrows the boundary's revocable
 attribution token. Child threads whose block belongs to the sealed Ruby source

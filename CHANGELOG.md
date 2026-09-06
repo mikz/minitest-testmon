@@ -10,6 +10,8 @@
 - Classify unattributed input through provider claims instead of reporting a
   false late observer activation for ignored external framework loads.
 - Verify real-browser `test:all` cold publication, warm selection, and view edits.
+- Attribute synchronous Puma configuration loading and mode hooks during
+  Capybara startup without attaching the persistent server thread to a test.
 
 - Exclude repository-local dependency Ruby under paths such as `vendor/bundle`
   from both inventory and runtime evidence, including opaque file reads, so

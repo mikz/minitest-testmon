@@ -35,6 +35,12 @@ if defined?(Rails::Railtie)
             if ENV[RailsBootstrap::COMMAND_ENV]
               require "minitest/testmon/request_attribution"
               app.middleware.unshift(Minitest::Testmon::RequestAttribution)
+              if Gem.loaded_specs.key?("puma")
+                require "puma"
+                require "puma/configuration"
+                require "minitest/testmon/puma_configuration_attribution"
+                Puma::Configuration.prepend(Minitest::Testmon::PumaConfigurationAttribution)
+              end
             end
           end
         end

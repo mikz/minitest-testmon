@@ -197,10 +197,15 @@ Attribution inside a system test relies on an explicit operating assumption:
   handling requests. Testmon borrows the same token only while Puma loads and
   finalizes that configuration, including its mode hooks. A configuration
   operation still in flight when the test ends blocks publication.
+  Configuration creates shared server state, so its observations are
+  suite-scoped, not dependencies of only the first system test. Inputs that
+  can only be claimed per test make that run incomplete instead of allowing
+  later tests to use stale shared state.
 
-The stamp is strictly per-request and borrows the boundary's revocable
-attribution token. Child threads whose block belongs to the sealed Ruby source
-inventory inherit that same token. Persistent gem-owned Puma and Playwright
+The stamp lasts only for the request or configuration operation and borrows
+the boundary's revocable attribution token. Child threads whose block belongs
+to the sealed Ruby source inventory (including project configuration)
+inherit that token and evidence scope. Persistent gem-owned Puma and Playwright
 service threads do not inherit it. An attributed child or borrowed request
 still active when the test finishes is `thread_leak`; revocation
 prevents its later work from being attached to another test. Project Ruby on a

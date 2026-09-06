@@ -54,6 +54,18 @@ class ExecutionContextTest < TestmonTestCase
     assert_nil Thread.new { Context.current_test }.value
   end
 
+  def test_nested_request_attribution_cannot_narrow_shared_configuration_evidence
+    Context.set("BrowserTest#test_boot")
+    Context.begin_boundary
+    middleware = Minitest::Testmon::RequestAttribution.new(->(_env) { Context.evidence_scope })
+
+    observed = Context.with_boundary_attribution(evidence_scope: :suite) { middleware.call({}) }
+
+    assert_equal :suite, observed
+    assert_equal :test, Context.evidence_scope
+    assert_empty Context.clear
+  end
+
   def test_unowned_service_thread_stays_unattributed_and_can_outlive_the_test
     ready = Queue.new
     release = Queue.new

@@ -70,10 +70,17 @@ module Minitest
         @observation_claims = Hash.new { |hash, key| hash[key] = [] }
         @observations = observations
         @observation_overrides = {}
+        @suite_sources = snapshot_context.artifacts.select do |artifact|
+          artifact.scope == :suite && %w[content ruby_source].include?(artifact.facet) && artifact.fingerprint&.known?
+        end.to_h { |artifact| [[artifact.root, artifact.relative_path, artifact.fingerprint], artifact] }.freeze
       end
 
       def claim(artifact, observation, provider: artifact.provider)
         if observation.scope == :suite && artifact.scope != :suite
+          if %w[content ruby_source].include?(artifact.facet)
+            suite_source = @suite_sources[[artifact.root, artifact.relative_path, artifact.fingerprint]]
+            return claim(suite_source, observation, provider: suite_source.provider) if suite_source
+          end
           reason = (observation.reason == :late_activation) ? :late_activation : :ambiguous_context
           incomplete(reason)
           unresolved(observation, reason)
@@ -290,6 +297,9 @@ module Minitest
       def record(observation)
         return observation if @worker_sealed
         raise PhaseError, "observations are closed" unless @phase == :observing
+        if ExecutionContext.evidence_scope == :suite && observation.scope != :suite
+          observation = Observation.build(**observation.to_h.except(:key).merge(scope: :suite, test_id: nil))
+        end
         @spool ? @spool.record_observation(observation) : @observations << observation
         observation
       end

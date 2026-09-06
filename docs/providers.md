@@ -381,6 +381,14 @@ Project Ruby executed by a pre-existing pool with no token while a boundary is
 active is `ambiguous_context` and also blocks publication. A true observer
 late-start failure remains `late_activation` and blocks publication.
 
+Server configuration uses suite-scoped evidence while borrowing a test token
+for lifetime tracking. Its owned child threads inherit that scope. Claims for
+test-only inputs fail closed in this scope rather than assigning shared
+startup state to whichever test first starts the server. An existing
+suite-scoped whole-file input with the same canonical path and fingerprint
+can satisfy a content or Ruby-source claim; this does not promote test inputs
+or ignore explicit attribution failures.
+
 Provider definitions are part of the configuration snapshot. Duplicate names,
 unknown inventory/facet references, invalid roots, unsupported digest or
 granularity values, unknown artifact keys, observer failures, and unclaimed

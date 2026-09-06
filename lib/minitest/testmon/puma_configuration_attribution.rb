@@ -9,11 +9,11 @@ module Minitest
     # the server's lifetime. Nested load inside clamp reuses the same borrow.
     module PumaConfigurationAttribution
       def load(...)
-        ExecutionContext.with_boundary_attribution { super }
+        ExecutionContext.with_boundary_attribution(evidence_scope: :suite) { super }
       end
 
       def clamp(...)
-        ExecutionContext.with_boundary_attribution { super }
+        ExecutionContext.with_boundary_attribution(evidence_scope: :suite) { super }
       end
     end
   end

@@ -73,6 +73,46 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
     end
   end
 
+  def test_real_browser_configuration_cannot_assign_shared_helpers_to_its_first_test
+    with_rails_cli_project do |project, runtime, cli|
+      project.write("lib/puma_boot_input.rb", <<~RUBY)
+        module PumaBootInput
+          def self.value
+            4
+          end
+        end
+      RUBY
+      project.write("config/puma.rb", <<~RUBY)
+        require_relative "../lib/puma_boot_input"
+        threads 0, PumaBootInput.value
+      RUBY
+      replace_cli_fixture(project, "test/system/dashboard_system_test.rb",
+        "class DashboardSystemTest < ApplicationSystemTestCase", <<~RUBY.chomp)
+          class DashboardSystemTest < ApplicationSystemTestCase
+            setup do
+              require Rails.root.join("lib/puma_boot_input")
+              PumaBootInput.value
+            end
+        RUBY
+      browser_env = {"RAILS_ACCEPTANCE_BROWSER" => "1"}
+      result, report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+
+      assert_equal 0, result.exitstatus, cli_failure("shared Puma configuration", result)
+      assert_includes report.dig("tests", "executed"), DASHBOARD_TEST
+      assert_includes report.dig("tests", "executed"), GREETING_SYSTEM_TEST
+      assert_equal false, report.dig("publication", "published")
+      assert_includes report.fetch("diagnostics"), "ambiguous_context"
+
+      replace_cli_fixture(project, "lib/puma_boot_input.rb", "    4", "    3")
+      changed, changed_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, changed.exitstatus, cli_failure("changed shared Puma configuration", changed)
+      assert_includes changed_report.dig("tests", "executed"), DASHBOARD_TEST
+      assert_includes changed_report.dig("tests", "executed"), GREETING_SYSTEM_TEST
+      assert_equal false, changed_report.dig("publication", "published")
+      assert_includes changed_report.fetch("diagnostics"), "ambiguous_context"
+    end
+  end
+
   def test_asset_edit_selects_exactly_its_consuming_system_test
     with_rails_cli_project do |project, runtime, cli|
       _, cold_report = run_cli(runtime, cli, command: "test:all")

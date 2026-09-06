@@ -15,9 +15,12 @@ module Minitest
           token = ExecutionContext.attribution_token
           return super(*arguments, **keywords, &block) unless token && block && token.owns_thread_block?(block)
 
+          evidence_scope = ExecutionContext.evidence_scope
           thread = super(*arguments, **keywords) do |*block_arguments|
             thread = Thread.current
-            ExecutionContext.with_attribution(token) { block.call(*block_arguments) }
+            ExecutionContext.with_evidence_scope(evidence_scope) do
+              ExecutionContext.with_attribution(token) { block.call(*block_arguments) }
+            end
           ensure
             token.unregister(thread) if thread
           end

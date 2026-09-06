@@ -4,6 +4,7 @@ module Minitest
   module Testmon
     module ExecutionContext
       KEY = :__minitest_testmon_test_id
+      EVIDENCE_SCOPE_KEY = :__minitest_testmon_evidence_scope
 
       class AttributionToken
         def initialize(test_id, thread_sources: nil)
@@ -69,8 +70,8 @@ module Minitest
         token if token&.live?
       end
 
-      # Request attribution borrows this token only under the documented
-      # isolated in-process server assumption. It is nil outside a sole
+      # Request and server-configuration attribution borrow this token under
+      # the documented isolated-server assumption. It is nil outside a sole
       # boundary and while test boundaries overlap.
       def sole_active_attribution
         token = @sole_active_attribution
@@ -105,12 +106,27 @@ module Minitest
         token.unregister(thread) if borrowed
       end
 
-      def with_boundary_attribution
-        token = sole_active_attribution
-        if token && current_test.nil?
-          with_borrowed_attribution(token) { yield }
-        else
-          yield
+      def evidence_scope
+        Thread.current.thread_variable_get(EVIDENCE_SCOPE_KEY) || :test
+      end
+
+      def with_evidence_scope(scope)
+        previous = Thread.current.thread_variable_get(EVIDENCE_SCOPE_KEY)
+        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, scope)
+        yield
+      ensure
+        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, previous)
+      end
+
+      def with_boundary_attribution(evidence_scope: :test)
+        evidence_scope = :suite if self.evidence_scope == :suite
+        with_evidence_scope(evidence_scope) do
+          token = sole_active_attribution
+          if token && current_test.nil?
+            with_borrowed_attribution(token) { yield }
+          else
+            yield
+          end
         end
       end
 

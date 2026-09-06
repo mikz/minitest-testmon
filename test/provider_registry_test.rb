@@ -185,6 +185,28 @@ class ProviderRegistryTest < TestmonTestCase
     end
   end
 
+  def test_suite_evidence_reuses_an_existing_identical_whole_file_suite_input
+    with_project do |project|
+      path = write_file(File.join(project, "config/puma.rb"), "threads 0, 4\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :"rails.boot", Minitest::Testmon::Bundles::Rails81::BootDefinition.new, version: 1
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+      original = Minitest::Testmon::Observation.build(kind: :coverage_lines, path: path, test_id: "BrowserTest#test_first")
+      normalized = Minitest::Testmon::ExecutionContext.with_evidence_scope(:suite) { session.record(original) }
+      report = session.finalize
+
+      assert report.complete?, report.diagnostics.inspect
+      assert_equal :suite, normalized.scope
+      assert_nil normalized.test_id
+      refute_equal original.key, normalized.key
+      boot_input = report.artifacts.find { |item| item.provider == :"rails.boot@1" && item.relative_path == "config/puma.rb" }
+      assert_equal :suite, boot_input.scope
+      assert report.dependencies.any? { |item| item.artifact_key == boot_input.key && item.test_id == "*" }
+      assert_equal :test, Minitest::Testmon::ExecutionContext.evidence_scope
+    end
+  end
+
   def test_late_activation_is_rejected_instead_of_publishing_an_unpersisted_suite_input
     with_project do |project|
       path = write_file(File.join(project, "config", "application.yml"), "value: one\n")

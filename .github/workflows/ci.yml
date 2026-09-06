@@ -60,4 +60,11 @@ jobs:
         with:
           ruby-version: "4.0.6"
           bundler-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install the matching Playwright browser
+        run: |
+          playwright_version="$(bundle exec ruby -rplaywright -e 'print Playwright::COMPATIBLE_PLAYWRIGHT_VERSION')"
+          npx --yes "playwright@$playwright_version" install --with-deps chromium
       - run: bundle exec rake test:acceptance

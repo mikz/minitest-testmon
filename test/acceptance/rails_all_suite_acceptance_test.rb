@@ -14,6 +14,40 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
   DASHBOARD_TEST = "DashboardSystemTest#test_dashboard_lists_tracked_widgets"
   GREETING_SYSTEM_TEST = "DashboardSystemTest#test_greeting_page_renders_for_visitors"
 
+  def test_real_browser_all_suite_publishes_warms_and_selects_changed_view
+    assert_real_browser_suite(workers: 1)
+  end
+
+  def test_process_parallel_real_browser_all_suite_publishes_warms_and_selects_changed_view
+    assert_real_browser_suite(workers: 2)
+  end
+
+  def assert_real_browser_suite(workers:)
+    with_rails_cli_project(workers:) do |project, runtime, cli|
+      replace_cli_fixture(project, "test/system/dashboard_system_test.rb",
+        "greeting page renders for visitors", "Potkáme greeting page renders for visitors")
+      browser_env = {"RAILS_ACCEPTANCE_BROWSER" => "1"}
+      cold, cold_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env, timeout: 90)
+
+      assert_equal 0, cold.exitstatus, cli_failure("browser cold test:all", cold)
+      assert_equal [], cold_report.fetch("diagnostics"), cli_failure("browser diagnostics", cold)
+      assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_full_cold!(cold_report) }
+      assert_includes cold_report.dig("tests", "executed"), DASHBOARD_TEST
+      assert_includes cold_report.dig("tests", "executed"), "DashboardSystemTest#test_Potkáme_greeting_page_renders_for_visitors"
+
+      warm, warm_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, warm.exitstatus, cli_failure("browser warm test:all", warm)
+      assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_warm!(cold_report, warm_report, selected: []) }
+
+      replace_cli_fixture(project, "app/views/greetings/dashboard.html.erb", "Dashboard</h1>", "Dashboard v2</h1>")
+      changed, changed_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, changed.exitstatus, cli_failure("browser changed view", changed)
+      assert_equal [DASHBOARD_TEST], changed_report.dig("tests", "selected")
+      assert_equal [DASHBOARD_TEST], changed_report.dig("tests", "executed")
+      assert_equal true, changed_report.dig("publication", "published")
+    end
+  end
+
   def test_all_suite_learns_publishes_and_certifies_including_system_tests
     with_rails_cli_project do |_project, runtime, cli|
       cold, cold_report = run_cli(runtime, cli, command: "test:all")

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Hash complete observation identities with a binary-safe canonical encoding,
+  including Unicode test names and source paths.
+- Let real Capybara/Puma and Playwright system suites publish: only threads
+  defined in the sealed Ruby inventory inherit test-lifetime attribution.
+  Application thread leaks and unfinished Rack requests still block publication.
+- Classify unattributed input through provider claims instead of reporting a
+  false late observer activation for ignored external framework loads.
+- Verify real-browser `test:all` cold publication, warm selection, and view edits.
+
 - Exclude repository-local dependency Ruby under paths such as `vendor/bundle`
   from both inventory and runtime evidence, including opaque file reads, so
   serial and process-parallel Rails runs can publish complete evidence.

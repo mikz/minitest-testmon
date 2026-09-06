@@ -13,7 +13,7 @@ module Minitest
       %i[new start fork].each do |constructor|
         define_method(constructor) do |*arguments, **keywords, &block|
           token = ExecutionContext.attribution_token
-          return super(*arguments, **keywords, &block) unless token && block
+          return super(*arguments, **keywords, &block) unless token && block && token.owns_thread_block?(block)
 
           thread = super(*arguments, **keywords) do |*block_arguments|
             thread = Thread.current

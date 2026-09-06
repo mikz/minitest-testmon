@@ -6,8 +6,9 @@ module Minitest
       KEY = :__minitest_testmon_test_id
 
       class AttributionToken
-        def initialize(test_id)
+        def initialize(test_id, thread_sources: nil)
           @test_id = test_id.to_s.freeze
+          @thread_sources = thread_sources
           @live = true
           @threads = {}
           @mutex = Mutex.new
@@ -19,6 +20,15 @@ module Minitest
 
         def live?
           @live
+        end
+
+        def owns_thread_block?(block)
+          return true unless @thread_sources
+
+          path = block.source_location&.first
+          path && @thread_sources.key?(File.realpath(path))
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP
+          false
         end
 
         def register(thread)
@@ -95,9 +105,9 @@ module Minitest
         token.unregister(thread) if borrowed
       end
 
-      def set(test_id)
+      def set(test_id, thread_sources: nil)
         clear
-        token = AttributionToken.new(test_id)
+        token = AttributionToken.new(test_id, thread_sources:)
         Thread.current.thread_variable_set(KEY, token)
         token
       end

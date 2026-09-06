@@ -12,10 +12,18 @@ Run the default unit and style checks:
 bundle exec rake
 ```
 
-The full black-box suite requires PostgreSQL:
+The full black-box suite requires PostgreSQL, Node.js, and Chromium matching
+the Playwright client. Install the browser once:
 
 ```sh
-bundle exec rake test:acceptance
+playwright_version="$(bundle exec ruby -rplaywright -e 'print Playwright::COMPATIBLE_PLAYWRIGHT_VERSION')"
+npx --yes "playwright@$playwright_version" install chromium
+```
+
+Run all checks, including the real-browser Rails suite:
+
+```sh
+bundle exec rake ci
 ```
 
 Keep changes focused, add regression coverage, and do not weaken fail-open

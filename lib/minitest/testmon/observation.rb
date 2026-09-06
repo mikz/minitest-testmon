@@ -19,9 +19,9 @@ module Minitest
     ) do
       def self.build(kind:, provider: :core, path: nil, operation: nil, scope: nil, test_id: nil, callsite: nil, exists_at_observation: nil, reason: nil, details: {})
         scope ||= test_id ? :test : :suite
-        stable = [kind, provider, path, operation, scope, test_id, callsite, reason, CanonicalJSON.fingerprint(details)]
+        stable = [kind, provider, path, operation, scope, test_id, callsite, reason, details]
         new(
-          key: Digest::SHA256.hexdigest(stable.join("\0")),
+          key: Digest::SHA256.hexdigest(CanonicalJSON.fingerprint(stable)),
           kind: kind.to_sym,
           provider: provider.to_sym,
           path: path,

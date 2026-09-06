@@ -195,8 +195,10 @@ Attribution inside a system test relies on an explicit operating assumption:
   the visiting test rather than left unattributed.
 
 The stamp is strictly per-request and borrows the boundary's revocable
-attribution token. Child threads created by the request inherit that same
-token. A child still alive when the test finishes is `thread_leak`; revocation
+attribution token. Child threads whose block belongs to the sealed Ruby source
+inventory inherit that same token. Persistent gem-owned Puma and Playwright
+service threads do not inherit it. An attributed child or borrowed request
+still active when the test finishes is `thread_leak`; revocation
 prevents its later work from being attached to another test. Project Ruby on a
 pre-existing pool with no token is `ambiguous_context` while a boundary is
 active. Both conditions make the run incomplete, as does a true late observer

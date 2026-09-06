@@ -3,6 +3,35 @@
 require_relative "test_helper"
 
 class ProviderObserverTest < TestmonTestCase
+  def test_unattributed_tracepoint_events_ignore_external_inputs_but_reject_project_inputs
+    with_project do |project|
+      path = write_file(File.join(project, "documents", "invoice.txt"), "total")
+      [true, false].each do |external|
+        configuration = Minitest::Testmon::Configuration.new(cwd: project)
+        configuration.provider :documents, version: 1 do
+          inventory :documents, root: :project, include: "documents/**/*.txt"
+          facet :content, inventory: :documents, digest: :content, granularity: :file
+          observe_tracepoint :document_read,
+            target: [ProviderObserverTest::Loader, :load_document],
+            path: ->(trace) { trace.local(:filename) unless external }
+          ignore :document_read, reason: "external input", predicate: ->(event) { event.path.nil? }
+          claim :document_read, to: %i[documents content], path: :path
+        end
+        session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+        Minitest::Testmon::ThreadContextPropagation.install!
+        Minitest::Testmon::ExecutionContext.set("DocumentTest#test_invoice", thread_sources: {}.freeze)
+        Thread.new { Loader.new.load_document(path) }.value
+        Minitest::Testmon::ExecutionContext.clear
+        report = session.finalize
+
+        assert_equal external, report.complete?
+        assert_equal external ? [] : ["ambiguous_context"], report.diagnostics
+      ensure
+        Minitest::Testmon::ExecutionContext.clear
+      end
+    end
+  end
+
   class Loader
     def load_document(filename)
       File.binread(filename)

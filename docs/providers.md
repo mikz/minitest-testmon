@@ -372,8 +372,10 @@ existence change, symlink retarget, or canonical-path change during the run
 retains the prior revision and leaves selected tests in retry state.
 
 Testmon propagates a revocable attribution token through `Thread.new`,
-`Thread.start`, and `Thread.fork`, so joined child-thread work is claimed by the
-test that created it. Finishing the test revokes that token; a still-live child
+`Thread.start`, and `Thread.fork` when the block's canonical source path belongs
+to the sealed Ruby inventory. Joined project child-thread work is claimed by
+the test that created it; persistent gem-owned service threads stay unbound.
+Finishing the test revokes that token; a still-live attributed child
 marks the run incomplete as `thread_leak` and can no longer claim later work.
 Project Ruby executed by a pre-existing pool with no token while a boundary is
 active is `ambiguous_context` and also blocks publication. A true observer

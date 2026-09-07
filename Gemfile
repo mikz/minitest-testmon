@@ -16,7 +16,7 @@ group :test do
   gem "bundlebun", "~> 0.5.0"
   gem "capybara", "~> 3.40"
   gem "capybara-playwright-driver", "~> 0.5.10"
-  gem "minitest-reporters", "= 1.7.1"
+  gem "minitest-reporters", "1.8.0"
   gem "pg", "~> 1.6"
   gem "propshaft", "~> 1.3"
   gem "puma", "~> 8.0"

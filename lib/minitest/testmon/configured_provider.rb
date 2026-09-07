@@ -246,7 +246,8 @@ module Minitest
           members: members.sort.freeze,
           scope: scope,
           test_ids: [].freeze,
-          reason: reason || fingerprint.reason
+          reason: reason || fingerprint.reason,
+          identity: identity
         )
       end
 

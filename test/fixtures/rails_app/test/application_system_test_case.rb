@@ -8,7 +8,7 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
     driven_by :playwright, options: {
       browser_type: :chromium,
       headless: true,
-      playwright_cli_executable_path: "npx --yes playwright@#{Playwright::COMPATIBLE_PLAYWRIGHT_VERSION}"
+      playwright_cli_executable_path: ENV.fetch("PLAYWRIGHT_CLI_EXECUTABLE_PATH")
     }
   else
     driven_by :rack_test

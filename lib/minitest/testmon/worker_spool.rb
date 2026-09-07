@@ -194,6 +194,7 @@ module Minitest
         data[:operation] = data[:operation]&.to_sym
         data[:scope] = data.fetch(:scope).to_sym
         data[:reason] = data[:reason]&.to_sym
+        data[:provenance] = data[:provenance]&.to_sym
         data[:callsite] = data[:callsite]&.transform_keys(&:to_sym)
         # Observation details are provider-owned canonical data. Preserve their
         # JSON key shape; recursively symbolizing them changes the public

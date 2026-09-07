@@ -1,4 +1,5 @@
 /.bundle/
+/node_modules/
 /.minitest-testmon.sqlite3*
 /coverage/
 /pkg/

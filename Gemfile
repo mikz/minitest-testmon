@@ -13,6 +13,7 @@ group :development do
 end
 
 group :test do
+  gem "bundlebun", "~> 0.5.0"
   gem "capybara", "~> 3.40"
   gem "capybara-playwright-driver", "~> 0.5.10"
   gem "minitest-reporters", "= 1.7.1"

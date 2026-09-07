@@ -73,8 +73,16 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_real_browser_configuration_cannot_assign_shared_helpers_to_its_first_test
-    with_rails_cli_project do |project, runtime, cli|
+  def test_real_browser_configuration_publishes_and_retains_shared_helpers
+    assert_shared_helper_suite(workers: 1)
+  end
+
+  def test_process_parallel_real_browser_configuration_publishes_and_retains_shared_helpers
+    assert_shared_helper_suite(workers: 2)
+  end
+
+  def assert_shared_helper_suite(workers:)
+    with_rails_cli_project(workers:) do |project, runtime, cli|
       project.write("lib/puma_boot_input.rb", <<~RUBY)
         module PumaBootInput
           def self.value
@@ -93,23 +101,60 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
               require Rails.root.join("lib/puma_boot_input")
               PumaBootInput.value
             end
-        RUBY
+      RUBY
       browser_env = {"RAILS_ACCEPTANCE_BROWSER" => "1"}
-      result, report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      cold, cold_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
 
-      assert_equal 0, result.exitstatus, cli_failure("shared Puma configuration", result)
-      assert_includes report.dig("tests", "executed"), DASHBOARD_TEST
-      assert_includes report.dig("tests", "executed"), GREETING_SYSTEM_TEST
-      assert_equal false, report.dig("publication", "published")
-      assert_includes report.fetch("diagnostics"), "ambiguous_context"
+      assert_equal 0, cold.exitstatus, cli_failure("shared Puma configuration cold run", cold)
+      assert_empty cold_report.fetch("diagnostics")
+      assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_full_cold!(cold_report) }
+      assert_includes cold_report.dig("tests", "executed"), DASHBOARD_TEST
+      assert_includes cold_report.dig("tests", "executed"), GREETING_SYSTEM_TEST
+      assert_equal true, cold_report.dig("publication", "published")
+      shared_helper = cold_report.dig("inventory", "suite_scoped", "items").find do |item|
+        item.fetch("facet") == "ruby_source" && item.fetch("path").end_with?("lib/puma_boot_input.rb")
+      end
+      refute_nil shared_helper, "shared Puma helper was not promoted to suite evidence"
+
+      warm, warm_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, warm.exitstatus, cli_failure("shared Puma configuration warm run", warm)
+      assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_warm!(cold_report, warm_report, selected: []) }
+
+      replace_cli_fixture(project, "test/unrelated_test.rb", "2 + 2", "1 + 3")
+      partial, partial_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, partial.exitstatus, cli_failure("unrelated partial rerun", partial)
+      assert_equal ["UnrelatedTest#test_unrelated"], partial_report.dig("tests", "selected")
+      assert_equal ["UnrelatedTest#test_unrelated"], partial_report.dig("tests", "executed")
+      assert_equal true, partial_report.dig("publication", "published")
+
+      retained, retained_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, retained.exitstatus, cli_failure("retained shared helper warm run", retained)
+      assert_cli_oracle do
+        MinitestTestmonAcceptance::RailsCliOracle.assert_warm!(partial_report, retained_report, selected: [])
+      end
 
       replace_cli_fixture(project, "lib/puma_boot_input.rb", "    4", "    3")
       changed, changed_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
       assert_equal 0, changed.exitstatus, cli_failure("changed shared Puma configuration", changed)
-      assert_includes changed_report.dig("tests", "executed"), DASHBOARD_TEST
-      assert_includes changed_report.dig("tests", "executed"), GREETING_SYSTEM_TEST
-      assert_equal false, changed_report.dig("publication", "published")
-      assert_includes changed_report.fetch("diagnostics"), "ambiguous_context"
+      assert_equal cold_report.dig("tests", "discovered"), changed_report.dig("tests", "selected")
+      assert_equal cold_report.dig("tests", "discovered"), changed_report.dig("tests", "executed")
+      assert_equal true, changed_report.dig("publication", "published")
+
+      project.write("config/puma.rb", "threads 0, 4\n")
+      removed, removed_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, removed.exitstatus, cli_failure("removed shared Puma helper", removed)
+      assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_full_cold!(removed_report) }
+      removed_helper = removed_report.dig("inventory", "suite_scoped", "items").find do |item|
+        item.fetch("facet") == "ruby_source" && item.fetch("path").end_with?("lib/puma_boot_input.rb")
+      end
+      assert_nil removed_helper
+
+      replace_cli_fixture(project, "lib/puma_boot_input.rb", "    3", "    2")
+      changed_again, changed_again_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert_equal 0, changed_again.exitstatus, cli_failure("changed test-specific Puma helper", changed_again)
+      assert_equal [DASHBOARD_TEST, GREETING_SYSTEM_TEST].sort, changed_again_report.dig("tests", "selected")
+      assert_equal [DASHBOARD_TEST, GREETING_SYSTEM_TEST].sort, changed_again_report.dig("tests", "executed")
+      assert_equal true, changed_again_report.dig("publication", "published")
     end
   end
 

@@ -382,12 +382,20 @@ active is `ambiguous_context` and also blocks publication. A true observer
 late-start failure remains `late_activation` and blocks publication.
 
 Server configuration uses suite-scoped evidence while borrowing a test token
-for lifetime tracking. Its owned child threads inherit that scope. Claims for
-test-only inputs fail closed in this scope rather than assigning shared
-startup state to whichever test first starts the server. An existing
-suite-scoped whole-file input with the same canonical path and fingerprint
-can satisfy a content or Ruby-source claim; this does not promote test inputs
-or ignore explicit attribution failures.
+for lifetime tracking. Its owned child threads inherit that scope. Inputs
+without a safe whole-file identity fail closed in this scope rather than
+assigning shared startup state to whichever test first starts the server. An
+observation recorded under that explicit suite boundary may promote a known
+whole-file content or Ruby-source artifact. An unattributed nil-test
+observation cannot create new suite ownership, but it may reuse an existing
+suite-scoped whole-file input with the same canonical path and fingerprint.
+Published suite scope is stored with each test snapshot and carried through a
+later partial run only when the current provider/configuration context still
+matches, so a server that does not start cannot erase a learned shared
+dependency. A schema mismatch quarantines the old cache and starts cold. None
+of these paths ignore explicit attribution failures. A complete selected run
+re-evaluates suite ownership from live evidence, so a helper removed from shared
+startup is not retained as a suite dependency.
 
 Provider definitions are part of the configuration snapshot. Duplicate names,
 unknown inventory/facet references, invalid roots, unsupported digest or

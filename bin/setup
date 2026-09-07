@@ -2,3 +2,5 @@
 set -euo pipefail
 
 bundle install
+bundle exec bundlebun install --frozen-lockfile
+bundle exec bundlebun node_modules/playwright-core/cli.js install chromium

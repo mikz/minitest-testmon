@@ -77,7 +77,11 @@ class StoreTest < TestmonTestCase
   def test_round_trips_literal_suite_claimed_and_definition_inputs_for_one_test
     with_store do |store|
       test_id = "ExampleTest#test_value"
-      values = [input("$context", "context"), input("view", "view"), input("test-file", "definition")]
+      values = [
+        input("$context", "context", scope: :suite),
+        input("view", "view"),
+        input("test-file", "definition")
+      ]
       selection = selection_for([test_id], [test_id], store.revision)
       report = Report.build(discovered: [test_id], selected: [test_id], executed: [test_id])
       stored = Minitest::Testmon::TestSnapshot.new(
@@ -91,6 +95,7 @@ class StoreTest < TestmonTestCase
       restored = store.snapshots_for([test_id]).fetch(test_id)
       assert_equal %w[$context test-file view], restored.inputs.map(&:key).sort
       assert_equal %w[context definition view], restored.inputs.map { |item| item.fingerprint.digest }.sort
+      assert_equal :suite, restored.inputs.find { |item| item.key == "$context" }.scope
     end
   end
 
@@ -230,14 +235,15 @@ class StoreTest < TestmonTestCase
     )
   end
 
-  def input(key, digest)
+  def input(key, digest, scope: :test)
     Minitest::Testmon::Input.new(
       key: key,
       provider: "core@1",
       facet: "content",
       root: "project",
       relative_path: "lib/#{key}.rb",
-      fingerprint: Minitest::Testmon::Fingerprint.known(digest)
+      fingerprint: Minitest::Testmon::Fingerprint.known(digest),
+      scope: scope
     )
   end
 

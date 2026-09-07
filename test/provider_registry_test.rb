@@ -207,6 +207,88 @@ class ProviderRegistryTest < TestmonTestCase
     end
   end
 
+  def test_explicit_suite_evidence_promotes_a_known_content_file_artifact
+    with_project do |project|
+      path = write_file(File.join(project, "lib", "boot_helper.rb"), "VALUE = 4\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :boot_helper, version: 1 do |provider|
+        provider.inventory :ruby, root: :project, include: "lib/**/*.rb"
+        provider.facet :content, inventory: :ruby, digest: :content, granularity: :file
+        provider.claim :boot_read, to: %i[ruby content], path: :path
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      original = Minitest::Testmon::Observation.build(
+        kind: :boot_read,
+        provider: :boot_helper,
+        path: path,
+        test_id: "BrowserTest#test_boot"
+      )
+
+      normalized = Minitest::Testmon::ExecutionContext.with_evidence_scope(:suite) do
+        session.record(original)
+      end
+      report = session.finalize
+      artifact = report.artifacts.find do |item|
+        item.provider == :"boot_helper@1" && item.facet == "content"
+      end
+
+      assert report.complete?, report.diagnostics.inspect
+      assert normalized.explicit_suite_evidence?
+      assert_equal :suite, artifact.scope
+      assert_equal "*", report.dependencies.find { |item| item.artifact_key == artifact.key }.test_id
+    end
+  end
+
+  def test_explicit_suite_evidence_cannot_promote_a_contents_set_artifact
+    with_project do |project|
+      write_file(File.join(project, "lib", "boot_helper.rb"), "VALUE = 4\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :boot_helper, version: 1 do |provider|
+        provider.inventory :ruby, root: :project, include: "lib/**/*.rb"
+        provider.facet :contents, inventory: :ruby, digest: :contents, granularity: :set
+        provider.claim :boot_read, to: %i[ruby contents]
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      Minitest::Testmon::ExecutionContext.with_evidence_scope(:suite) do
+        session.record(Minitest::Testmon::Observation.build(
+          kind: :boot_read,
+          provider: :boot_helper,
+          scope: :test
+        ))
+      end
+      report = session.finalize
+
+      refute report.complete?
+      assert_includes report.diagnostics, "ambiguous_context"
+    end
+  end
+
+  def test_unattributed_suite_observation_cannot_promote_a_whole_file_artifact
+    with_project do |project|
+      path = write_file(File.join(project, "lib", "boot_helper.rb"), "VALUE = 4\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :boot_helper, version: 1 do |provider|
+        provider.inventory :ruby, root: :project, include: "lib/**/*.rb"
+        provider.facet :content, inventory: :ruby, digest: :content, granularity: :file
+        provider.claim :boot_read, to: %i[ruby content], path: :path
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      session.record(Minitest::Testmon::Observation.build(
+        kind: :boot_read,
+        provider: :boot_helper,
+        path: path
+      ))
+
+      report = session.finalize
+
+      refute report.complete?
+      assert_includes report.diagnostics, "ambiguous_context"
+    end
+  end
+
   def test_late_activation_is_rejected_instead_of_publishing_an_unpersisted_suite_input
     with_project do |project|
       path = write_file(File.join(project, "config", "application.yml"), "value: one\n")

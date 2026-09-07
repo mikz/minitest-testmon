@@ -45,6 +45,24 @@ class WorkerSpoolTest < TestmonTestCase
     end
   end
 
+  def test_round_trip_preserves_explicit_suite_evidence_provenance
+    with_project do |project|
+      spool = build_spool(project)
+      item = Minitest::Testmon::Observation.build(
+        kind: :ruby_require,
+        path: "/project/lib/boot_helper.rb"
+      ).as_suite_evidence
+      spool.record_observation(item)
+      assert spool.complete!
+
+      round_trip = merge(project).observations.fetch(0)
+
+      assert round_trip.explicit_suite_evidence?
+      assert_equal :suite, round_trip.scope
+      assert_nil round_trip.test_id
+    end
+  end
+
   def test_completion_failure_leaves_an_incomplete_spool_and_does_not_raise
     with_project do |project|
       spool = build_spool(project)

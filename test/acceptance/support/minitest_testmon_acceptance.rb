@@ -4,6 +4,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "open3"
+require "bundlebun"
 # standard:disable Lint/RedundantRequireStatement
 require "pathname"
 # standard:enable Lint/RedundantRequireStatement
@@ -17,6 +18,11 @@ module MinitestTestmonAcceptance
   FIXTURES = REPOSITORY_ROOT.join("test/fixtures")
   GEMFILE = REPOSITORY_ROOT.join("Gemfile")
   EXECUTABLE = REPOSITORY_ROOT.join("exe/minitest-testmon")
+  PLAYWRIGHT_CLI = REPOSITORY_ROOT.join("node_modules/playwright-core/cli.js")
+  PLAYWRIGHT_CLI_EXECUTABLE = Shellwords.join([
+    Bundlebun::Runner.binary_path,
+    PLAYWRIGHT_CLI.to_s
+  ])
 end
 
 require_relative "minitest_testmon_acceptance/driver"

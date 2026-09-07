@@ -89,6 +89,12 @@ GEM
     base64 (0.3.0)
     bigdecimal (4.1.2)
     builder (3.3.0)
+    bundlebun (0.5.1.1.4.2-aarch64-linux-gnu)
+      json (~> 2.0)
+    bundlebun (0.5.1.1.4.2-arm64-darwin)
+      json (~> 2.0)
+    bundlebun (0.5.1.1.4.2-x86_64-linux-gnu)
+      json (~> 2.0)
     capybara (3.40.0)
       addressable
       matrix
@@ -304,6 +310,7 @@ PLATFORMS
   x86_64-linux
 
 DEPENDENCIES
+  bundlebun (~> 0.5.0)
   capybara (~> 3.40)
   capybara-playwright-driver (~> 0.5.10)
   irb
@@ -336,6 +343,9 @@ CHECKSUMS
   base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
   bigdecimal (4.1.2) sha256=53d217666027eab4280346fba98e7d5b66baaae1b9c3c1c0ffe89d48188a3fbd
   builder (3.3.0) sha256=497918d2f9dca528fdca4b88d84e4ef4387256d984b8154e9d5d3fe5a9c8835f
+  bundlebun (0.5.1.1.4.2-aarch64-linux-gnu) sha256=091f00cc49dcb8016004ed48904e38cd0abf31dd05b30f7ad2384f328c27a9d1
+  bundlebun (0.5.1.1.4.2-arm64-darwin) sha256=2a065ae0dda0b62fef8b3d0202b2d865ba792df8d9fd225687501d04fd9e9b2a
+  bundlebun (0.5.1.1.4.2-x86_64-linux-gnu) sha256=02929b94445bc856845072f987497ff688c2565f10b5541830fd2afafe12337b
   bundler (4.0.16) sha256=d6ca5dd440c24f9abce9844cf44cc8e18c6a553de65a47efb4544137af92c47d
   capybara (3.40.0) sha256=42dba720578ea1ca65fd7a41d163dd368502c191804558f6e0f71b391054aeef
   capybara-playwright-driver (0.5.10) sha256=e48e572d72bc1043c644fab44985be0a1e75d7d6917dc298355581848982a2c3

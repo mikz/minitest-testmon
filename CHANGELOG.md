@@ -13,8 +13,11 @@
 - Attribute synchronous Puma configuration loading and mode hooks during
   Capybara startup without attaching the persistent server thread to a test.
 - Preserve suite-scoped evidence for shared server configuration and its
-  children. Reject test-only startup dependencies instead of under-selecting
-  later system tests.
+  children. Reject startup dependencies that cannot be safely shared instead
+  of under-selecting later system tests.
+- Persist explicit shared-helper scope in test snapshots and retain it across
+  safe partial runs; full runs recertify ownership, and incompatible cache
+  schemas start cold.
 
 - Exclude repository-local dependency Ruby under paths such as `vendor/bundle`
   from both inventory and runtime evidence, including opaque file reads, so

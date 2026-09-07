@@ -1,6 +1,7 @@
 # Contributing
 
-Use Ruby 4.0.6 and install dependencies:
+Use Ruby 4.0.6. Install the locked Ruby, BundleBun, and Playwright
+dependencies, including Chromium:
 
 ```sh
 bin/setup
@@ -12,15 +13,8 @@ Run the default unit and style checks:
 bundle exec rake
 ```
 
-The full black-box suite requires PostgreSQL, Node.js, and Chromium matching
-the Playwright client. Install the browser once:
-
-```sh
-playwright_version="$(bundle exec ruby -rplaywright -e 'print Playwright::COMPATIBLE_PLAYWRIGHT_VERSION')"
-npx --yes "playwright@$playwright_version" install chromium
-```
-
-Run all checks, including the real-browser Rails suite:
+The full black-box suite also requires PostgreSQL. Run all checks, including
+the real-browser Rails suite:
 
 ```sh
 bundle exec rake ci

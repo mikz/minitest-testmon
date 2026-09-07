@@ -17,12 +17,7 @@ module Minitest
       end
 
       def call(env)
-        token = ExecutionContext.sole_active_attribution
-        if token && ExecutionContext.current_test.nil?
-          ExecutionContext.with_borrowed_attribution(token) { @app.call(env) }
-        else
-          @app.call(env)
-        end
+        ExecutionContext.with_boundary_attribution { @app.call(env) }
       end
     end
   end

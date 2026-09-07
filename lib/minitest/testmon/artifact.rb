@@ -4,9 +4,25 @@ require_relative "input"
 
 module Minitest
   module Testmon
-    Artifact = Data.define(:key, :provider, :root, :relative_path, :facet, :fingerprint, :members, :scope, :test_ids, :reason) do
+    Artifact = Data.define(:key, :provider, :root, :relative_path, :facet, :fingerprint, :members, :scope, :test_ids, :reason, :identity) do
       def path
         "#{root}:#{relative_path}"
+      end
+
+      def known?
+        !!fingerprint&.known?
+      end
+
+      def suite?
+        scope == :suite
+      end
+
+      def whole_file?
+        %i[content whole_file].include?(identity)
+      end
+
+      def source_identity
+        [root, relative_path, fingerprint]
       end
 
       def inventory_item

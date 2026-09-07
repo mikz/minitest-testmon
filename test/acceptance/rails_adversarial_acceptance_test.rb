@@ -6,6 +6,7 @@ class RailsAdversarialAcceptanceTest < Minitest::Test
   include RailsProductAcceptance
 
   ITERATIONS = 20_000
+  HIGH_VOLUME_BARRIER_TIMEOUT = 90
   MAX_SPOOL_BYTES = 32 * 1024 * 1024
   MAX_PROCESS_RSS_KIB = 384 * 1024
 
@@ -38,8 +39,18 @@ class RailsAdversarialAcceptanceTest < Minitest::Test
           err: stderr.to_s,
           pgroup: true
         )
-        wait_for("high-volume worker never reached post-observation barrier", timeout: 30) do
-          barrier.glob("ready-*").any?
+        diagnostic = ->(message) do
+          "#{message}\nstdout:\n#{stdout.read}\nstderr:\n#{stderr.read}"
+        end
+        wait_for(
+          -> { diagnostic.call("high-volume worker never reached post-observation barrier after #{HIGH_VOLUME_BARRIER_TIMEOUT}s") },
+          timeout: HIGH_VOLUME_BARRIER_TIMEOUT
+        ) do
+          next true if barrier.glob("ready-*").any?
+          if (waited = Process.waitpid2(runner_pid, Process::WNOHANG))
+            flunk diagnostic.call("high-volume Rails runner exited before reaching the post-observation barrier (#{waited.last.inspect})")
+          end
+          false
         end
         wait_for("worker spool was not externally visible before test exit", timeout: 10) do
           jsonl_spools(project).any? { |path| path.size.positive? }

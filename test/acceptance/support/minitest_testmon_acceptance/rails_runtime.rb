@@ -19,6 +19,8 @@ module MinitestTestmonAcceptance
         "RAILS_ACCEPTANCE_DB_HOST" => ENV.fetch("RAILS_ACCEPTANCE_DB_HOST", "localhost"),
         "RAILS_ACCEPTANCE_DB_USER" => ENV.fetch("RAILS_ACCEPTANCE_DB_USER", "postgres"),
         "RAILS_ACCEPTANCE_DB_PASSWORD" => ENV["RAILS_ACCEPTANCE_DB_PASSWORD"],
+        "PLAYWRIGHT_CLI_EXECUTABLE_PATH" =>
+          MinitestTestmonAcceptance::PLAYWRIGHT_CLI_EXECUTABLE.to_s,
         # Validation-only workaround for pg/libpq GSS state inherited across fork on Ruby 4.
         "PGGSSENCMODE" => ENV.fetch("RAILS_ACCEPTANCE_PGGSSENCMODE", "disable")
       }

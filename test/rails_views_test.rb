@@ -43,22 +43,30 @@ class RailsViewsTest < TestmonTestCase
       unknown_root = Dir.mktmpdir("minitest-testmon-unknown-layout")
       layout = write_file(File.join(external, "app/views/layouts/lookbook.html.erb"), "lookbook")
       unknown = write_file(File.join(unknown_root, "unknown-layout.html.erb"), "unknown")
+      project_view = write_file(File.join(project, "app/views/preview.html.erb"), "preview")
       script = <<~RUBY
         require "json"
         require "active_support/notifications"
+        require "action_controller"
         require "minitest/testmon"
+
+        ActionController::Base.append_view_path(#{File.join(project, "app/views").inspect})
 
         Spec = Struct.new(:full_gem_path)
 
-        def report_for(project, path, gem_root: nil)
+        def report_for(project, path, gem_root: nil, unattributed: false)
           Gem.loaded_specs["lookbook"] = Spec.new(gem_root) if gem_root
           configuration = Minitest::Testmon::Configuration.new(cwd: project)
           definition = Minitest::Testmon::Bundles::Rails81::ViewsDefinition.new(configuration)
           configuration.provider :"rails.views", definition, version: 1
           session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
-          Minitest::Testmon::ExecutionContext.with_test("LookbookPreviewsTest#test_preview") do
+          emit = proc do
             ActiveSupport::Notifications.instrument("render_layout.action_view", identifier: path)
           end
+          Minitest::Testmon::ThreadContextPropagation.install!
+          Minitest::Testmon::ExecutionContext.set("LookbookPreviewsTest#test_preview", thread_sources: {}.freeze)
+          unattributed ? Thread.new(&emit).value : emit.call
+          Minitest::Testmon::ExecutionContext.clear
           session.finalize.to_h
         ensure
           Gem.loaded_specs.delete("lookbook")
@@ -68,6 +76,8 @@ class RailsViewsTest < TestmonTestCase
         rejected = report_for(#{project.inspect}, #{unknown.inspect})
         puts JSON.generate(ignored)
         puts JSON.generate(rejected)
+        puts JSON.generate(report_for(#{project.inspect}, #{layout.inspect}, gem_root: #{external.inspect}, unattributed: true))
+        puts JSON.generate(report_for(#{project.inspect}, #{project_view.inspect}, unattributed: true))
       RUBY
       stdout, stderr, status = Open3.capture3(
         RbConfig.ruby,
@@ -78,7 +88,11 @@ class RailsViewsTest < TestmonTestCase
       )
 
       assert status.success?, stderr
-      ignored, rejected = stdout.lines.map { |line| JSON.parse(line) }
+      ignored, rejected, unattributed_external, unattributed_project = stdout.lines.map { |line| JSON.parse(line) }
+      assert_equal true, unattributed_external.fetch("complete")
+      assert_equal [], unattributed_external.fetch("diagnostics")
+      assert_equal false, unattributed_project.fetch("complete")
+      assert_includes unattributed_project.fetch("diagnostics"), "ambiguous_context"
       assert_equal true, ignored.fetch("complete")
       ignored_item = ignored.dig("observations", "ignored", "items").find do |item|
         item.fetch("operation") == "render_layout.action_view"

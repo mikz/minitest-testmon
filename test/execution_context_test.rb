@@ -54,6 +54,53 @@ class ExecutionContextTest < TestmonTestCase
     assert_nil Thread.new { Context.current_test }.value
   end
 
+  def test_nested_request_attribution_cannot_narrow_shared_configuration_evidence
+    Context.set("BrowserTest#test_boot")
+    Context.begin_boundary
+    middleware = Minitest::Testmon::RequestAttribution.new(->(_env) { Context.evidence_scope })
+
+    observed = Context.with_boundary_attribution(evidence_scope: :suite) { middleware.call({}) }
+
+    assert_equal :suite, observed
+    assert_equal :test, Context.evidence_scope
+    assert_empty Context.clear
+  end
+
+  def test_unowned_service_thread_stays_unattributed_and_can_outlive_the_test
+    ready = Queue.new
+    release = Queue.new
+    Context.set("BrowserTest#test_page", thread_sources: {}.freeze)
+    child = Thread.new do
+      ready << Context.current_test
+      release.pop
+    end
+
+    assert_nil ready.pop
+    assert_empty Context.clear
+    assert child.alive?
+  ensure
+    release << true
+    child&.join
+  end
+
+  def test_owned_thread_blocks_use_canonical_inventory_paths
+    with_project do |project|
+      source = write_file(File.join(project, "worker.rb"), "Thread.current[:testmon_fixture_block] = proc { Minitest::Testmon::ExecutionContext.current_test }")
+      alias_path = File.join(project, "worker_alias.rb")
+      File.symlink(source, alias_path)
+      load alias_path, true
+      owned_block = Thread.current[:testmon_fixture_block]
+      Thread.current[:testmon_fixture_block] = nil
+      Context.set("WorkerTest#test_owned", thread_sources: {File.realpath(source) => true}.freeze)
+
+      %i[new start fork].each do |constructor|
+        assert_equal "WorkerTest#test_owned", Thread.public_send(constructor, &owned_block).value
+      end
+      assert_nil Thread.new { Context.current_test }.value
+      assert_empty Context.clear
+    end
+  end
+
   def test_clear_revokes_attribution_in_a_leaked_child
     ready = Queue.new
     release = Queue.new
@@ -79,7 +126,7 @@ class ExecutionContextTest < TestmonTestCase
       collector = Minitest::Testmon::CoverageCollector.new(
         session,
         resolver: Minitest::Testmon::PathResolver.new(project: project),
-        allowed_paths: []
+        allowed_paths: [__FILE__]
       )
       ready = Queue.new
       release = Queue.new

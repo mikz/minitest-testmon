@@ -193,14 +193,39 @@ Attribution inside a system test relies on an explicit operating assumption:
   for the duration of the request, so app code, template renders,
   translations, and asset resolutions triggered by a page load are claimed by
   the visiting test rather than left unattributed.
+- Puma loads application configuration on the server-startup thread before
+  handling requests. Testmon borrows the same token only while Puma loads and
+  finalizes that configuration, including its mode hooks. A configuration
+  operation still in flight when the test ends blocks publication.
+  Configuration creates shared server state, so its observations are
+  suite-scoped, not dependencies of only the first system test. This explicit
+  boundary can promote a known whole-file content or Ruby-source input, such
+  as `config/puma.rb` or a required boot helper, to suite scope. An
+  unattributed nil-test observation cannot create new suite ownership, though
+  it may reuse an existing suite-scoped whole-file owner. A set-content or
+  existence-only input still fails closed instead of allowing later tests to
+  use stale shared state.
 
-The stamp is strictly per-request and borrows the boundary's revocable
-attribution token. Child threads created by the request inherit that same
-token. A child still alive when the test finishes is `thread_leak`; revocation
+The stamp lasts only for the request or configuration operation and borrows
+the boundary's revocable attribution token. Child threads whose block belongs
+to the sealed Ruby source inventory (including project configuration)
+inherit that token and evidence scope. Persistent gem-owned Puma and Playwright
+service threads do not inherit it. An attributed child or borrowed request
+still active when the test finishes is `thread_leak`; revocation
 prevents its later work from being attached to another test. Project Ruby on a
 pre-existing pool with no token is `ambiguous_context` while a boundary is
 active. Both conditions make the run incomplete, as does a true late observer
 activation. Overlapping boundaries (thread-parallel tests) remain rejected.
+
+Suite scope is persisted in each passing test snapshot. During a later partial
+run, Testmon retains those shared inputs only when the current
+provider/configuration context still matches. This preserves a learned Puma
+helper dependency even when Puma does not start in that run; a changed context
+drops the carry and requires a fresh complete run to learn it again. Cache
+schema changes quarantine the old database and start with a cold cache. A
+complete selected run re-evaluates suite ownership from live evidence, so a
+helper removed from Puma startup remains attached only to the tests that use
+it directly.
 
 JavaScript executed in the browser is invisible to Ruby coverage; the
 `rails.assets@1` provider covers the served files instead. An edit to an asset

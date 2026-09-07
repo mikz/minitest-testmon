@@ -372,12 +372,30 @@ existence change, symlink retarget, or canonical-path change during the run
 retains the prior revision and leaves selected tests in retry state.
 
 Testmon propagates a revocable attribution token through `Thread.new`,
-`Thread.start`, and `Thread.fork`, so joined child-thread work is claimed by the
-test that created it. Finishing the test revokes that token; a still-live child
+`Thread.start`, and `Thread.fork` when the block's canonical source path belongs
+to the sealed Ruby inventory. Joined project child-thread work is claimed by
+the test that created it; persistent gem-owned service threads stay unbound.
+Finishing the test revokes that token; a still-live attributed child
 marks the run incomplete as `thread_leak` and can no longer claim later work.
 Project Ruby executed by a pre-existing pool with no token while a boundary is
 active is `ambiguous_context` and also blocks publication. A true observer
 late-start failure remains `late_activation` and blocks publication.
+
+Server configuration uses suite-scoped evidence while borrowing a test token
+for lifetime tracking. Its owned child threads inherit that scope. Inputs
+without a safe whole-file identity fail closed in this scope rather than
+assigning shared startup state to whichever test first starts the server. An
+observation recorded under that explicit suite boundary may promote a known
+whole-file content or Ruby-source artifact. An unattributed nil-test
+observation cannot create new suite ownership, but it may reuse an existing
+suite-scoped whole-file input with the same canonical path and fingerprint.
+Published suite scope is stored with each test snapshot and carried through a
+later partial run only when the current provider/configuration context still
+matches, so a server that does not start cannot erase a learned shared
+dependency. A schema mismatch quarantines the old cache and starts cold. None
+of these paths ignore explicit attribution failures. A complete selected run
+re-evaluates suite ownership from live evidence, so a helper removed from shared
+startup is not retained as a suite dependency.
 
 Provider definitions are part of the configuration snapshot. Duplicate names,
 unknown inventory/facet references, invalid roots, unsupported digest or

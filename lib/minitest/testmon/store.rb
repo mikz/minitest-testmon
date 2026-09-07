@@ -14,7 +14,7 @@ module Minitest
     # read-side decision; this class atomically validates and publishes run
     # evidence while owning durable state, leases, and receipts.
     class Store
-      SCHEMA_VERSION = 6
+      SCHEMA_VERSION = 7
       DEFAULT_RETAINED_REPORTS = 10
       SchemaIncompatible = Class.new(StandardError)
 
@@ -28,6 +28,7 @@ module Minitest
         @leased = false
         @lease_token = nil
         @lease_owner_pid = nil
+        @lease_run_id = nil
         FileUtils.mkdir_p(File.dirname(@path))
         connect
         validate_or_rebuild!
@@ -125,9 +126,10 @@ module Minitest
 
           @lease_token = SecureRandom.uuid
           @lease_owner_pid = Process.pid
+          @lease_run_id = run_id&.to_s
           @database.execute(
             "INSERT INTO leases(name, token, owner_pid, run_id, created_at) VALUES ('cache', ?, ?, ?, ?)",
-            [@lease_token, @lease_owner_pid, run_id&.to_s, timestamp]
+            [@lease_token, @lease_owner_pid, @lease_run_id, timestamp]
           )
         end
         @leased = true
@@ -207,6 +209,7 @@ module Minitest
         raise PhaseError, "cache store is disconnected" unless connected?
         transaction do
           verify_lease!
+          abandon_run(@lease_run_id, "worker_incomplete")
           @database.execute("DELETE FROM leases WHERE name = 'cache' AND token = ?", [@lease_token])
         end
         clear_lease
@@ -353,6 +356,7 @@ module Minitest
             root TEXT,
             relative_path TEXT,
             digest TEXT,
+            scope TEXT NOT NULL CHECK (scope IN ('test', 'suite')),
             state TEXT NOT NULL CHECK (state IN ('known', 'missing')),
             PRIMARY KEY(test_id, provider, input_key)
           );
@@ -412,12 +416,13 @@ module Minitest
           @database.execute(
             <<~SQL,
               INSERT INTO test_inputs(
-                test_id, provider, input_key, facet, root, relative_path, digest, state
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                test_id, provider, input_key, facet, root, relative_path, digest, scope, state
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             SQL
             [
               snapshot.test_id, input.provider, input.key, input.facet, input.root,
-              input.relative_path, input.fingerprint.digest, input.fingerprint.state.to_s
+              input.relative_path, input.fingerprint.digest, input.scope.to_s,
+              input.fingerprint.state.to_s
             ]
           )
         end
@@ -427,7 +432,7 @@ module Minitest
         placeholders = (["?"] * ids.length).join(",")
         @database.execute(
           <<~SQL,
-            SELECT test_id, provider, input_key, facet, root, relative_path, digest, state
+            SELECT test_id, provider, input_key, facet, root, relative_path, digest, scope, state
             FROM test_inputs WHERE test_id IN (#{placeholders})
             ORDER BY test_id, provider, input_key
           SQL
@@ -444,7 +449,8 @@ module Minitest
             facet: row.fetch("facet"),
             root: row["root"],
             relative_path: row["relative_path"],
-            fingerprint: fingerprint
+            fingerprint: fingerprint,
+            scope: row.fetch("scope").to_sym
           )]
         end
       end
@@ -589,6 +595,7 @@ module Minitest
         @leased = false
         @lease_token = nil
         @lease_owner_pid = nil
+        @lease_run_id = nil
       end
     end
   end

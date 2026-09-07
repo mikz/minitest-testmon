@@ -20,16 +20,26 @@ module Minitest
         )
         @force_full = ENV["MINITEST_TESTMON_FULL"] == "1"
         @run_id = ENV["MINITEST_TESTMON_RUN_ID"] || SecureRandom.uuid
+        @snapshots = {}.freeze
+        @suite_input_ids = [].freeze
         @process_parallel = false
         @exit_state = nil
       end
 
       def install(options)
+        installed = false
         ThreadContextPropagation.install!
         @exit_state = options.fetch(:minitest_testmon_exit_state)
         discovered = discovered_tests(options)
         @discovered = discovered
-        @session = @snapshot.observe(tests: {discovered: discovered}, selected: [])
+        @store.acquire_lease!(run_id: @run_id)
+        @snapshots = @store.snapshots_for(discovered)
+        @suite_input_ids = retained_suite_input_ids(@snapshots)
+        @session = @snapshot.observe(
+          tests: {discovered: discovered},
+          selected: [],
+          suite_input_ids: @suite_input_ids
+        )
         Testmon.take_early_observations.each { |observation| @session.record(observation) }
         core_roots = @snapshot.ruby_inventory_roots
         core_paths = @snapshot.ruby_inventory_paths
@@ -49,7 +59,6 @@ module Minitest
           observe_files: @force_full || @snapshot.claims_event?(:file_open, :file_read),
           boundary_tracker: @collector
         ).start)
-        @store.acquire_lease!(run_id: @run_id)
         @process_parallel = rails_process_parallel?
         reject_unsupported_parallelism!(discovered)
 
@@ -64,6 +73,7 @@ module Minitest
             base_revision: @store.revision
           )
         end
+        @session.retain_suite_input_ids!((@selection.selected == discovered) ? [] : @suite_input_ids)
         @store.start_execution(run_id: @run_id, selection: @selection)
         @selected_tests = @selection.selected
         @session.selected!(@selected_tests)
@@ -73,10 +83,10 @@ module Minitest
 
         reporter = RuntimeReporter.new(self, @collector, @session, @store, @configuration)
         Minitest.reporter << reporter
+        installed = true
         reporter
-      rescue LeaseUnavailable
-        @store.close
-        raise
+      ensure
+        @store.close unless installed
       end
 
       def process_parallel?
@@ -153,11 +163,25 @@ module Minitest
         Selector.new.call(
           discovered: @discovered,
           current_inputs: @current_inputs,
-          snapshots: @store.snapshots_for(@discovered),
+          snapshots: @snapshots,
           retries: @store.retries_for(@discovered),
           force: @force_full,
-          base_revision: @store.revision
+          base_revision: @store.revision,
+          suite_input_ids: @suite_input_ids
         )
+      end
+
+      def retained_suite_input_ids(snapshots)
+        context_input = @snapshot.current_inputs.find { |input| input.key == "$context" }
+        return [].freeze unless context_input&.known?
+
+        snapshots.values.filter_map do |snapshot|
+          next unless snapshot.inputs.any? do |input|
+            input.id == context_input.id && input.fingerprint == context_input.fingerprint
+          end
+
+          snapshot.inputs.select(&:suite?).map(&:id)
+        end.flatten.uniq.sort_by(&:to_s).freeze
       end
 
       def discovered_tests(options)

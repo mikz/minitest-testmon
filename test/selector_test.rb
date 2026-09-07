@@ -91,12 +91,34 @@ class SelectorTest < TestmonTestCase
     assert_equal ["input_unknown:core@1:racing"], selection.reasons_by_test.fetch("ExampleTest#test_value")
   end
 
+  def test_selects_every_snapshot_that_has_not_learned_a_retained_suite_input
+    suite = input("shared", "v1", scope: :suite)
+    learned = input("other", "v1")
+    snapshots = {
+      "LearnedTest#test_shared" => snapshot("LearnedTest#test_shared", suite),
+      "UnlearnedTest#test_shared" => snapshot("UnlearnedTest#test_shared", learned)
+    }
+
+    selection = @selector.call(
+      discovered: snapshots.keys,
+      current_inputs: [suite, learned],
+      snapshots: snapshots,
+      retries: {},
+      base_revision: 3,
+      suite_input_ids: [suite.id]
+    )
+
+    assert_equal ["UnlearnedTest#test_shared"], selection.selected
+    assert_equal ["suite_input_missing:core@1:shared"],
+      selection.reasons_by_test.fetch("UnlearnedTest#test_shared")
+  end
+
   private
 
-  def input(key, digest)
+  def input(key, digest, scope: :test)
     Minitest::Testmon::Input.new(
       key: key, provider: "core@1", facet: "content",
-      fingerprint: Minitest::Testmon::Fingerprint.known(digest)
+      fingerprint: Minitest::Testmon::Fingerprint.known(digest), scope: scope
     )
   end
 

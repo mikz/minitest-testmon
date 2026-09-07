@@ -101,6 +101,28 @@ class RailsHarnessSelfTest < Minitest::Test
     project&.cleanup
   end
 
+  def test_rails_runtime_exports_a_stable_playwright_cli_path_for_copied_fixtures
+    project = MinitestTestmonAcceptance::Project.copy_fixture("rails_app")
+    runtime = MinitestTestmonAcceptance::RailsRuntime.new(project, workers: 1)
+
+    assert_equal(
+      MinitestTestmonAcceptance::PLAYWRIGHT_CLI_EXECUTABLE,
+      runtime.env.fetch("PLAYWRIGHT_CLI_EXECUTABLE_PATH")
+    )
+    assert_predicate MinitestTestmonAcceptance::PLAYWRIGHT_CLI, :absolute?
+    assert_predicate Pathname(Bundlebun::Runner.binary_path), :absolute?
+  ensure
+    project&.cleanup
+  end
+
+  def test_locked_playwright_core_version_matches_the_ruby_client
+    require "playwright"
+    package = JSON.parse(MinitestTestmonAcceptance::REPOSITORY_ROOT.join("package.json").read)
+    compatible_version = Playwright::COMPATIBLE_PLAYWRIGHT_VERSION
+
+    assert_equal compatible_version, package.dig("devDependencies", "playwright-core")
+  end
+
   def test_rails_acceptance_source_compiles_on_the_supported_ruby
     source = MinitestTestmonAcceptance::ROOT.join("rails_acceptance_test.rb")
 

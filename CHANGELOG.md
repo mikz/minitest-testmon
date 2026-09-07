@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Hash complete observation identities with a binary-safe canonical encoding,
+  including Unicode test names and source paths.
+- Let real Capybara/Puma and Playwright system suites publish: only threads
+  defined in the sealed Ruby inventory inherit test-lifetime attribution.
+  Application thread leaks and unfinished Rack requests still block publication.
+- Classify unattributed input through provider claims instead of reporting a
+  false late observer activation for ignored external framework loads.
+- Verify real-browser `test:all` cold publication, warm selection, and view edits.
+- Attribute synchronous Puma configuration loading and mode hooks during
+  Capybara startup without attaching the persistent server thread to a test.
+- Preserve suite-scoped evidence for shared server configuration and its
+  children. Reject startup dependencies that cannot be safely shared instead
+  of under-selecting later system tests.
+- Persist explicit shared-helper scope in test snapshots and retain it across
+  safe partial runs; full runs recertify ownership, and incompatible cache
+  schemas start cold.
+
 - Exclude repository-local dependency Ruby under paths such as `vendor/bundle`
   from both inventory and runtime evidence, including opaque file reads, so
   serial and process-parallel Rails runs can publish complete evidence.

@@ -15,7 +15,8 @@ class DiscoveryReportTest < TestmonTestCase
       members: [],
       scope: :test,
       test_ids: ["ExampleTest#test_value"],
-      reason: nil
+      reason: nil,
+      identity: nil
     )
     observation = Minitest::Testmon::Observation.build(
       kind: :file_read,
@@ -63,7 +64,7 @@ class DiscoveryReportTest < TestmonTestCase
     artifact = Minitest::Testmon::Artifact.new(
       key: "suite-key", provider: :suite, root: :project, relative_path: "config/app.yml",
       facet: "content", fingerprint: fingerprint, members: [], scope: :suite,
-      test_ids: [], reason: nil
+      test_ids: [], reason: nil, identity: nil
     )
     report = Minitest::Testmon::DiscoveryReport.new(
       context_signature: "context",

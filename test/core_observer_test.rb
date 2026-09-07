@@ -50,7 +50,10 @@ class CoreObserverTest < TestmonTestCase
         boundary_tracker: Struct.new(:boundary_active?).new(true)
       ).start
 
+      Minitest::Testmon::ThreadContextPropagation.install!
+      Minitest::Testmon::ExecutionContext.set("ObserverTest#test_unowned_worker", thread_sources: {}.freeze)
       Thread.new { load script }.join
+      Minitest::Testmon::ExecutionContext.clear
       observer.close
 
       ambiguous = session.observations.find { |item| item.operation == :unattributed_thread }
@@ -58,6 +61,9 @@ class CoreObserverTest < TestmonTestCase
       assert_equal :ambiguous_context, ambiguous.reason
       assert_equal :suite, ambiguous.scope
       assert_equal ["ambiguous_context"], session.diagnostics
+    ensure
+      Minitest::Testmon::ExecutionContext.clear
+      observer&.close
     end
   end
 

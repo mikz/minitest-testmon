@@ -4,10 +4,12 @@ module Minitest
   module Testmon
     module ExecutionContext
       KEY = :__minitest_testmon_test_id
+      EVIDENCE_SCOPE_KEY = :__minitest_testmon_evidence_scope
 
       class AttributionToken
-        def initialize(test_id)
+        def initialize(test_id, thread_sources: nil)
           @test_id = test_id.to_s.freeze
+          @thread_sources = thread_sources
           @live = true
           @threads = {}
           @mutex = Mutex.new
@@ -19,6 +21,15 @@ module Minitest
 
         def live?
           @live
+        end
+
+        def owns_thread_block?(block)
+          return true unless @thread_sources
+
+          path = block.source_location&.first
+          path && @thread_sources.key?(File.realpath(path))
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP
+          false
         end
 
         def register(thread)
@@ -59,8 +70,8 @@ module Minitest
         token if token&.live?
       end
 
-      # Request attribution borrows this token only under the documented
-      # isolated in-process server assumption. It is nil outside a sole
+      # Request and server-configuration attribution borrow this token under
+      # the documented isolated-server assumption. It is nil outside a sole
       # boundary and while test boundaries overlap.
       def sole_active_attribution
         token = @sole_active_attribution
@@ -95,9 +106,33 @@ module Minitest
         token.unregister(thread) if borrowed
       end
 
-      def set(test_id)
+      def evidence_scope
+        Thread.current.thread_variable_get(EVIDENCE_SCOPE_KEY) || :test
+      end
+
+      def with_evidence_scope(scope)
+        previous = Thread.current.thread_variable_get(EVIDENCE_SCOPE_KEY)
+        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, scope)
+        yield
+      ensure
+        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, previous)
+      end
+
+      def with_boundary_attribution(evidence_scope: :test)
+        evidence_scope = :suite if self.evidence_scope == :suite
+        with_evidence_scope(evidence_scope) do
+          token = sole_active_attribution
+          if token && current_test.nil?
+            with_borrowed_attribution(token) { yield }
+          else
+            yield
+          end
+        end
+      end
+
+      def set(test_id, thread_sources: nil)
         clear
-        token = AttributionToken.new(test_id)
+        token = AttributionToken.new(test_id, thread_sources:)
         Thread.current.thread_variable_set(KEY, token)
         token
       end

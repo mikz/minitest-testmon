@@ -27,7 +27,7 @@ module Minitest
         else
           @snapshots[test_id] = snapshot
         end
-        token = ExecutionContext.set(test_id)
+        token = ExecutionContext.set(test_id, thread_sources: @allowed_paths)
         ExecutionContext.begin_boundary(attribution: token)
       end
 

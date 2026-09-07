@@ -177,7 +177,7 @@ module Minitest
       def record_ruby_execution(path, event, line:, operation:)
         test_id = ExecutionContext.current_test
         return unless test_id
-        key = [test_id, path]
+        key = [test_id, ExecutionContext.evidence_scope, path]
         return if @ruby_execution[key]
         @ruby_execution[key] = true
         safe_record(Observation.build(

@@ -315,7 +315,6 @@ module Minitest
         return if reason == :conservative_file_construction && (!path || !File.file?(path))
         details = extract_details(wrapper)
         test_id = ExecutionContext.current_test
-        reason = :late_activation if reason.nil? && test_id.nil? && ExecutionContext.boundary_active?
         @session.record(Observation.build(
           kind: @observer.event_kind,
           provider: @definition.id.to_sym,
@@ -442,7 +441,6 @@ module Minitest
         path = raw_path && @resolver.resolve(raw_path.to_s).absolute_path
         details = @observer.details ? CanonicalObservationValue.call(@observer.details.call(wrapper)) : {}.freeze
         test_id = ExecutionContext.current_test
-        reason = :late_activation if test_id.nil? && ExecutionContext.boundary_active?
         @session.record(Observation.build(
           kind: @observer.event_kind,
           provider: @definition.id.to_sym,
@@ -450,7 +448,6 @@ module Minitest
           operation: @observer.notification_name.to_sym,
           test_id: test_id,
           exists_at_observation: path && File.exist?(path),
-          reason: reason,
           details: details || {}
         ))
       rescue PathError => error

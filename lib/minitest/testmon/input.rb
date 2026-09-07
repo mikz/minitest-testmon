@@ -38,6 +38,10 @@ module Minitest
       def known?
         fingerprint && !fingerprint.unknown?
       end
+
+      def suite?
+        scope == :suite
+      end
     end
   end
 end

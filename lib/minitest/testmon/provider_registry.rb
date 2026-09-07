@@ -70,10 +70,18 @@ module Minitest
         @observation_claims = Hash.new { |hash, key| hash[key] = [] }
         @observations = observations
         @observation_overrides = {}
+        @suite_sources = snapshot_context.artifacts.select do |artifact|
+          artifact.suite? && artifact.whole_file? && artifact.known?
+        end.to_h { |artifact| [artifact.source_identity, artifact] }.freeze
       end
 
       def claim(artifact, observation, provider: artifact.provider)
-        if observation.scope == :suite && artifact.scope != :suite
+        if observation.suite? && !artifact.suite?
+          suite_source = artifact.whole_file? && @suite_sources[artifact.source_identity]
+          return claim(suite_source, observation, provider: suite_source.provider) if suite_source
+          if observation.explicit_suite_evidence? && artifact.whole_file? && artifact.known?
+            return claim(artifact.with(scope: :suite, test_ids: [].freeze), observation, provider: artifact.provider)
+          end
           reason = (observation.reason == :late_activation) ? :late_activation : :ambiguous_context
           incomplete(reason)
           unresolved(observation, reason)
@@ -167,8 +175,8 @@ module Minitest
         @ruby_unhookable_paths = context.ruby_unhookable_paths(ruby_provider_id)
       end
 
-      def observe(tests: {}, selected: [])
-        ProviderSession.new(self, tests: tests, selected: selected).start
+      def observe(tests: {}, selected: [], suite_input_ids: [])
+        ProviderSession.new(self, tests: tests, selected: selected, suite_input_ids: suite_input_ids).start
       end
 
       def test_definition_input(test_id)
@@ -258,10 +266,11 @@ module Minitest
     class ProviderSession
       attr_reader :snapshot, :claimed_input_ids_by_test, :current_inputs
 
-      def initialize(snapshot, tests:, selected:)
+      def initialize(snapshot, tests:, selected:, suite_input_ids: [])
         @snapshot = snapshot
         @tests = tests
         @selected = selected
+        @suite_input_ids = Array(suite_input_ids).uniq.freeze
         @observations = []
         @handles = []
         @executed = []
@@ -290,6 +299,9 @@ module Minitest
       def record(observation)
         return observation if @worker_sealed
         raise PhaseError, "observations are closed" unless @phase == :observing
+        if ExecutionContext.evidence_scope == :suite && !observation.explicit_suite_evidence?
+          observation = observation.as_suite_evidence
+        end
         @spool ? @spool.record_observation(observation) : @observations << observation
         observation
       end
@@ -302,6 +314,11 @@ module Minitest
       def selected!(test_ids)
         raise PhaseError, "selection is closed" unless @phase == :observing
         @selected = Array(test_ids).map(&:to_s).uniq.sort
+      end
+
+      def retain_suite_input_ids!(input_ids)
+        raise PhaseError, "selection is closed" unless @phase == :observing
+        @suite_input_ids = Array(input_ids).uniq.freeze
       end
 
       def claimed_input_ids(test_id)
@@ -453,6 +470,7 @@ module Minitest
           .to_h
           .freeze
         artifacts = deduplicate_artifacts(claims.artifacts)
+        artifacts = retain_suite_artifacts(artifacts, claims)
         context_input = snapshot.current_inputs.find { |input| input.key == "$context" }
         inputs = artifacts.map(&:to_input)
         inputs << context_input if context_input
@@ -502,6 +520,21 @@ module Minitest
             test_ids: (scope == :suite) ? [].freeze : values.flat_map(&:test_ids).compact.uniq.sort.freeze,
             reason: base.reason
           )
+        end
+      end
+
+      def retain_suite_artifacts(artifacts, claims)
+        artifacts.map do |artifact|
+          next artifact unless @suite_input_ids.include?(artifact.to_input.id) && !artifact.suite?
+
+          retained = artifact.with(scope: :suite, test_ids: [].freeze)
+          claims.dependencies << Dependency.new(
+            test_id: "*",
+            artifact_key: retained.key,
+            provider: retained.provider,
+            complete: retained.known?
+          )
+          retained
         end
       end
     end

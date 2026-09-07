@@ -95,7 +95,7 @@ module MinitestTestmonAcceptance
       observations = report.fetch("observations").values.flat_map { |category| category.fetch("items") }
       matches = observations.select { |item| item.fetch("path")&.end_with?(path_suffix) }
       safe = matches.select do |item|
-        item.fetch("scope") != "test" && item.fetch("test_id").nil? && item.fetch("reason") == "late_activation"
+        item.fetch("scope") == "suite" && item.fetch("test_id").nil? && item.fetch("reason") == "ambiguous_context"
       end
       return safe.first unless safe.empty?
 

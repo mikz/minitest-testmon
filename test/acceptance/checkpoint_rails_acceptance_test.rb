@@ -23,6 +23,7 @@ class CheckpointRailsAcceptanceTest < Minitest::Test
         if cli.state_path.file?
           database = SQLite3::Database.new(cli.state_path.to_s, readonly: true)
           begin
+            next false unless database.get_first_value("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'test_snapshots'")
             accepted = database.execute("SELECT test_id FROM test_snapshots").flatten
           rescue SQLite3::BusyException
             next false

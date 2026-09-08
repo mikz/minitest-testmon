@@ -651,6 +651,20 @@ class CLIIntegrationTest < TestmonTestCase
     end
   end
 
+  def test_report_validation_checks_checkpoint_metadata_and_accepts_legacy_receipts
+    cli = Minitest::Testmon::CLI.new([])
+    legacy = valid_report(mode: "run")
+    assert cli.send(:valid_testmon_report?, legacy)
+    current = legacy.merge("schema_version" => 3,
+      "checkpoints" => {"count" => 0, "accepted_ids" => [], "stop_reason" => nil})
+    assert cli.send(:valid_testmon_report?, current)
+    [nil, {"count" => -1, "accepted_ids" => []},
+      {"count" => 1, "accepted_ids" => "not-an-array"},
+      {"count" => 1, "accepted_ids" => ["a", "a"]}].each do |invalid|
+      refute cli.send(:valid_testmon_report?, current.merge("checkpoints" => invalid))
+    end
+  end
+
   private
 
   def valid_report(mode:)

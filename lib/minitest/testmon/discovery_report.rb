@@ -5,7 +5,7 @@ require "digest"
 module Minitest
   module Testmon
     class DiscoveryReport
-      SCHEMA_VERSION = 2
+      SCHEMA_VERSION = 3
       IGNORED_REASONS = %i[excluded nonexistent user_ignored conservative_file_construction].freeze
       SUGGESTION_CODES = %w[
         uncovered_file opaque_c_call uncovered_notification outside_root path_set_churn
@@ -102,7 +102,8 @@ module Minitest
           observations: observation_categories.transform_values { |items| category(items) },
           inventory: inventory_categories.transform_values { |items| category(items) },
           suggestions: suggestions,
-          publication: publication
+          publication: publication,
+          checkpoints: {count: 0, accepted_ids: [], stop_reason: nil}
         }
       end
 

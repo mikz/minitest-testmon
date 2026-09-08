@@ -5,9 +5,10 @@ require "digest"
 module Minitest
   module Testmon
     class ConfiguredProvider
-      attr_reader :definition, :snapshot_manifest
+      attr_reader :definition, :snapshot_manifest, :capability_cache
 
-      def initialize(definition)
+      def initialize(definition, capability_cache: {})
+        @capability_cache = capability_cache
         @definition = definition
         @artifacts_by_facet = {}
         @facet_snapshots = {}
@@ -97,6 +98,17 @@ module Minitest
           inventories: inventory_manifests.sort_by { |name, _value| name.to_s }.to_h,
           artifacts: @artifacts_by_facet.values.flatten.map(&:inventory_item).sort_by { |item| item.fetch(:key) }
         }.freeze
+      end
+
+      # Source validation needs exact bytes and path ownership, not another
+      # round of artifact construction and MRI capability probes.
+      def validation_manifest(context)
+        @resolver = context.resolver
+        definition.inventories.map do |inventory|
+          files = inventory_files(inventory)
+          [inventory.name, inventory_manifest(inventory, files, context),
+            files.map { |locator| [locator.key, ContentFingerprint.call(locator.absolute_path).to_h] }]
+        end
       end
 
       def claim(observation, claims)
@@ -220,7 +232,15 @@ module Minitest
       end
 
       def ruby_artifacts(facet, locator, context)
-        result = RubyTraceCapabilityProbe.new(@resolver).call(locator.absolute_path)
+        before = ContentFingerprint.call(locator.absolute_path)
+        key = [locator.key, before.digest, RubyVM::InstructionSequence.compile_option]
+        result = capability_cache[key] if before.known?
+        unless result
+          result = RubyTraceCapabilityProbe.new(@resolver).call(locator.absolute_path)
+          after = ContentFingerprint.call(locator.absolute_path)
+          context.incomplete(:source_race) unless before == after
+          capability_cache[key] = result if before.known? && before == after
+        end
         context.add_ruby_trace_capability(definition.id, locator, result.unhookable_targets)
         scope = result.target_traceable? ? facet.scope : :suite
         fingerprint = ContentFingerprint.call(locator.absolute_path)

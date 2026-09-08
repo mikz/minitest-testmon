@@ -411,3 +411,14 @@ worker evidence transport; a provider must not open the testmon SQLite cache.
 Use [`minitest-testmon run --full`](discovery.md) after adding or changing a
 provider, then exercise content edits and membership add/delete/rename cases
 before publishing it to CI.
+
+## Checkpoint completeness
+
+Built-in declarative providers can publish validated passing tests before the
+run finishes. Testmon processes each observation once and leaves observers
+active between checkpoints. Every accepted snapshot includes the test's claimed
+inputs, definition input, and suite inputs.
+
+Providers with a `finalize` hook use end-of-run publication. Testmon reports this
+limitation instead of accepting evidence whose completeness depends on shutdown.
+Provider errors pause learning; they do not change Minitest's test result.

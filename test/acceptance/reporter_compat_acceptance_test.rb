@@ -56,7 +56,7 @@ class ReporterCompatAcceptanceTest < Minitest::Test
       assert result.success?, failure_message(load_order, "baseline", result)
       report = driver.report(project)
       assert_report_contract report
-      assert_equal 2, report.fetch("schema_version")
+      assert_equal 3, report.fetch("schema_version")
       assert_equal true, report.dig("publication", "published")
       MinitestTestmonAcceptance::RailsOracle.assert_auto_bundles!(report)
 

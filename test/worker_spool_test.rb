@@ -126,6 +126,8 @@ class WorkerSpoolTest < TestmonTestCase
 
   def test_reporter_surfaces_cleanup_failure_after_successful_publication
     runtime = Object.new
+    runtime.define_singleton_method(:flush_checkpoints) { |**| true }
+    runtime.define_singleton_method(:cache_summary) { true }
     runtime.define_singleton_method(:merge_worker_spools!) { true }
     runtime.define_singleton_method(:process_parallel?) { false }
     runtime.define_singleton_method(:infrastructure_failure!) { |_reason| true }
@@ -280,6 +282,29 @@ class WorkerSpoolTest < TestmonTestCase
     end
   end
 
+  def test_completed_frame_survives_unsealed_worker_and_rejects_wrong_outcome
+    with_project do |project|
+      spool = build_spool(project)
+      spool.record_observation(observation(0))
+      spool.seal_test("ExampleTest#test_many", :passed)
+      spool.abort
+      options = {directory: File.join(project, "workers"), run_id: RUN_ID,
+                 test_id: "ExampleTest#test_many", outcome: :passed,
+                 context_signature: "context", base_revision: 1, worker_count: 1}
+      observations, diagnostics, identity = Minitest::Testmon::WorkerSpool.completion(**options)
+      assert_equal [observation(0).key], observations.map(&:key)
+      assert_equal({"lines" => [1]}, observations.first.details)
+      assert_empty diagnostics
+      assert_equal [0, Process.pid, 1], identity
+      assert_raises(Minitest::Testmon::PhaseError) do
+        Minitest::Testmon::WorkerSpool.completion(**options.merge(outcome: :failed))
+      end
+      file = Dir[File.join(project, "workers", RUN_ID, "test-*.json")].fetch(0)
+      File.write(file, "{truncated")
+      assert_raises(JSON::ParserError) { Minitest::Testmon::WorkerSpool.completion(**options) }
+    end
+  end
+
   private
 
   def build_spool(project)
@@ -312,7 +337,8 @@ class WorkerSpoolTest < TestmonTestCase
     runtime.instance_variable_set(:@selection, Struct.new(:base_revision).new(1))
     runtime.instance_variable_set(:@selected_tests, ["ExampleTest#test_many"])
     runtime.instance_variable_set(:@session, session)
-    runtime.instance_variable_set(:@store, Struct.new(:reconnect!).new(true))
+    runtime.instance_variable_set(:@checkpoint_worker_ids, {})
+    runtime.instance_variable_set(:@store, Struct.new(:reconnect!, :connected?).new(true, false))
     runtime.instance_variable_set(:@configuration, Struct.new(:project_root).new(project))
     runtime
   end

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Save validated passing tests in durable checkpoints during serial and Rails
+  process-worker runs. Preserve accepted progress after failures or interruption;
+  pause further learning when source files change.
+- Report checkpoint progress separately from suite success. Report schema 3 adds
+  checkpoint counts, accepted test IDs, and the reason learning stopped. Migrate
+  cache schemas 6 and 7 without discarding their snapshots or retry state.
+
 - Hash complete observation identities with a binary-safe canonical encoding,
   including Unicode test names and source paths.
 - Let real Capybara/Puma and Playwright system suites publish: only threads

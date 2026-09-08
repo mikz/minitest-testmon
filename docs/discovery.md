@@ -89,10 +89,14 @@ the supported diagnostic interface.
 
 ## Fail-open outcomes
 
-The last accepted revision is retained when a run has any test failure,
-incomplete provider, unresolved path, source drift, malformed or missing worker
-spool, duplicate/mismatched execution ledger, or lease conflict. Tests with
-retry state are selected again. Startup incompleteness expands selection to all
-currently discovered tests; incompleteness found after selection rejects
-publication but cannot retroactively execute omitted tests. A report with
-`publication.published: false` is never a dependency baseline.
+Accepted checkpoints survive later test failures, source drift, and interruption.
+Tests with retry state are selected again; saved tests are compared against
+current input fingerprints before being skipped. Source drift stops further
+learning for that run. Incomplete provider evidence or worker frames cannot
+become checkpoints. Contradictory outcomes revoke the implicated checkpoint.
+
+Startup incompleteness expands selection to all discovered tests. Incompleteness
+found after selection cannot retroactively execute omitted tests. A report with
+`publication.published: false` does not certify a successful suite, even when its
+`checkpoints` field records accepted progress. `minitest-testmon runs` also shows
+checkpoint progress for running and abandoned runs.

@@ -106,8 +106,12 @@ module Minitest
         @observation_overrides[observation.key] = observation.with(reason: reason.to_sym)
       end
 
+      def observation_for(observation)
+        @observation_overrides.fetch(observation.key, observation)
+      end
+
       def observations
-        @observations.map { |observation| @observation_overrides.fetch(observation.key, observation) }
+        @observations.map { |observation| observation_for(observation) }
       end
     end
 
@@ -210,10 +214,12 @@ module Minitest
       end
 
       def source_stable?
+        validation = current_validation_manifest
+        return validation == @validated_manifest if @validated_manifest
         fresh_context = SnapshotContext.new(configuration)
         fresh_registrations = registrations.map do |registration|
           provider = if registration.provider.is_a?(ConfiguredProvider)
-            ConfiguredProvider.new(registration.provider.definition)
+            ConfiguredProvider.new(registration.provider.definition, capability_cache: registration.provider.capability_cache)
           else
             registration.provider
           end
@@ -227,12 +233,27 @@ module Minitest
         fresh_registrations.each do |registration|
           registration.provider.snapshot(fresh_context) if registration.provider.is_a?(ConfiguredProvider)
         end
-        digest_snapshot(fresh_registrations, fresh_context) == snapshot_digest
+        return false unless digest_snapshot(fresh_registrations, fresh_context) == snapshot_digest
+        if validation
+          return false unless validation == current_validation_manifest
+          @validated_manifest = validation
+        end
+        true
       rescue
         false
       end
 
       private
+
+      def current_validation_manifest
+        return unless registrations.all? { |item| item.provider.is_a?(ConfiguredProvider) }
+        validation_context = SnapshotContext.new(configuration)
+        payload = [configuration.current_config_source_manifest,
+          RubyVM::InstructionSequence.compile_option,
+          registrations.map { |item| ConfiguredProvider.new(item.provider.definition).validation_manifest(validation_context) },
+          validation_context.diagnostics]
+        Digest::SHA256.hexdigest(CanonicalJSON.generate(payload))
+      end
 
       def constantize_test_class(name)
         name.split("::").reject(&:empty?).reduce(Object) do |owner, part|
@@ -304,6 +325,10 @@ module Minitest
         end
         @spool ? @spool.record_observation(observation) : @observations << observation
         observation
+      end
+
+      def seal_completion(test_id, outcome)
+        @spool&.seal_test(test_id, outcome, diagnostics: @runtime_diagnostics)
       end
 
       def executed(test_id)
@@ -412,9 +437,64 @@ module Minitest
           @observations << Observation.build(kind: :provider_error, operation: :finalize, reason: :provider_incomplete, details: {error: error.class.name})
         end
 
-        claims = ClaimContext.new(snapshot.context, @observations)
+        claims = process_claims
+        snapshot.registrations.each do |registration|
+          registration.provider.finalize(claims) if registration.provider.respond_to?(:finalize)
+        rescue => error
+          claims.incomplete("provider_incomplete:#{registration.name}:#{error.class}")
+        end
+        claims.incomplete(:source_drift) unless snapshot.source_stable?
+        @phase = :finalized
+        build_report(claims)
+      end
+
+      # Claim each observation once; checkpoints leave observers running. Providers
+      # with a finalization hook cannot promise complete evidence before shutdown.
+      def checkpoint_supported?
+        snapshot.registrations.all? { |item| !item.provider.respond_to?(:finalize) }
+      end
+
+      def checkpoint_report
+        raise PhaseError, "checkpoint requires active observers" unless @phase == :observing
+        claims = process_claims
+        @checkpoint_inputs ||= snapshot.current_inputs.to_h { |input| [input.id, input] }
+        artifacts = claims.artifacts.drop(@checkpoint_artifact_count || 0)
+        @checkpoint_artifact_count = claims.artifacts.length
+        artifacts.each do |artifact|
+          input = artifact.to_input
+          previous = @checkpoint_inputs[input.id]
+          if @suite_input_ids.include?(input.id) || previous&.scope == :suite
+            input = input.with(scope: :suite)
+          end
+          @checkpoint_invalid = true if !input.known? || Observation::UNRESOLVED_REASONS.include?(artifact.reason)
+          @checkpoint_inputs[input.id] = input
+        end
+        @checkpoint_dependencies ||= Hash.new { |hash, key| hash[key] = {} }
+        dependencies = claims.dependencies.drop(@checkpoint_dependency_count || 0)
+        @checkpoint_dependency_count = claims.dependencies.length
+        dependencies.each do |dependency|
+          next if dependency.test_id == "*"
+          id = InputId.new(provider: dependency.provider, key: dependency.artifact_key)
+          @checkpoint_dependencies[dependency.test_id][id] = true
+        end
+        @claimed_input_ids_by_test = @checkpoint_dependencies.transform_values { |ids| ids.keys.freeze }.freeze
+        @current_inputs = @checkpoint_inputs.values.freeze
+        DiscoveryReport.new(context_signature: snapshot.signature,
+          complete: !@checkpoint_invalid, diagnostics: claims.diagnostics)
+      end
+
+      private
+
+      def process_claims
+        @claims ||= ClaimContext.new(snapshot.context, @observations)
+        claims = @claims
         @runtime_diagnostics.each { |reason| claims.incomplete(reason) }
-        @observations.each do |observation|
+        pending = @observations.drop(@claimed_observation_count || 0)
+        @claimed_observation_count = @observations.length
+        @processed_observations ||= {}
+        pending.each do |observation|
+          next if @processed_observations[observation.key]
+          @processed_observations[observation.key] = true
           # Late activation is a run-level completeness failure. A provider may
           # classify the observation as ignored for reporting, but it cannot
           # make evidence collected before its observer started complete.
@@ -451,12 +531,16 @@ module Minitest
             claims.incomplete("provider_incomplete:unclaimed:#{observation.kind}")
           end
         end
-        snapshot.registrations.each do |registration|
-          registration.provider.finalize(claims) if registration.provider.respond_to?(:finalize)
-        rescue => error
-          claims.incomplete("provider_incomplete:#{registration.name}:#{error.class}")
+        pending.each do |observation|
+          resolved = claims.observation_for(observation)
+          if resolved.unresolved? && claims.observation_claims.fetch(resolved.key, []).empty?
+            @checkpoint_invalid = true
+          end
         end
-        claims.incomplete(:source_drift) unless snapshot.source_stable?
+        claims
+      end
+
+      def build_report(claims)
         @claimed_input_ids_by_test = claims.dependencies
           .reject { |dependency| dependency.test_id == "*" }
           .group_by(&:test_id)
@@ -479,7 +563,6 @@ module Minitest
           claims.incomplete("duplicate_provider_input:#{duplicates.map(&:to_s).sort.join(",")}")
         end
         @current_inputs = inputs.uniq(&:id).sort_by { |input| input.id.to_s }.freeze
-        @phase = :finalized
 
         DiscoveryReport.new(
           context_signature: snapshot.signature,
@@ -499,8 +582,6 @@ module Minitest
           resolver: snapshot.context.resolver
         )
       end
-
-      private
 
       def transition!(from, to)
         raise PhaseError, "expected #{from} phase, got #{@phase}" unless @phase == from

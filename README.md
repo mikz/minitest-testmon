@@ -122,8 +122,16 @@ bundle exec minitest-testmon run --full -- bin/rails test
 
 Existing Minitest filters still apply. `run --full` runs every test included by
 the command, but it does not remove those filters. Use an unfiltered complete
-suite with `--full` when validating a provider. Testmon updates its cache only
-after a complete, successful run; otherwise it keeps the last known-good state.
+suite with `--full` when validating a provider. Testmon saves validated passing
+tests in checkpoints during the run. A later
+failure or interruption preserves those checkpoints. Failed, skipped, and
+unverified tests run again. Saved tests are skipped only when their recorded
+inputs still match.
+
+Checkpoints run at result boundaries after 25 passing tests or five seconds,
+and once more at normal completion. If files change during a run, Testmon stops
+learning for that run and preserves earlier checkpoints. Pending results are
+not saved. You can keep editing without losing progress already accepted.
 
 For Rails, use the project's own `bin/rails` with exactly `test` or `test:all`.
 Other command shapes are rejected before tests start. If Testmon cannot safely
@@ -133,6 +141,11 @@ warning.
 Testmon also rejects `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` because they can
 silently turn a complete suite into a partial run.
 
+The console reports cached, selected, checkpointed, retained, and retry counts.
+Report schema 3 adds `checkpoints` with `count`, `accepted_ids`, and `stop_reason`.
+A partial cache does not certify that the whole suite passed. Providers that
+require end-of-run finalization keep final-only publication.
+
 SQLite stores the current per-test snapshots and deterministic retained run
 receipts in `.minitest-testmon.sqlite3`. Read the latest receipt with
 `minitest-testmon report`; JSON is an output format, not a second state file.
@@ -140,9 +153,8 @@ The latest 10 run reports are retained by default. Set
 `config.retained_reports N` to choose a different positive limit.
 
 A skipped test gets retry state and is selected on every run until it passes.
-Its previous accepted snapshot, if any, is retained. A test failure rejects the
-whole publication atomically: snapshots from passing tests in the same run do
-not replace the last accepted state.
+Its previous accepted snapshot, if any, is retained. Failed tests also keep retry
+state. Validated passing tests from the same run can still be checkpointed.
 
 ## Rails 8.1
 

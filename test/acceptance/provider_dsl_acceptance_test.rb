@@ -10,7 +10,7 @@ class ProviderDslAcceptanceTest < Minitest::Test
   def test_valid_dsl_introspection_builtin_ids_fileset_sugar_and_deep_immutability
     with_provider_project do |project|
       report = learn_provider_baseline(project)
-      assert_equal 2, report.fetch("schema_version")
+      assert_equal 3, report.fetch("schema_version")
 
       snapshot = provider_definition_snapshot(project)
       expected = ["ruby@1", *ProviderProductAcceptance::CUSTOM_PROVIDER_IDS]

@@ -511,7 +511,7 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_native_failure_exits_one_retains_generation_and_releases_lease
+  def test_native_failure_exits_one_preserves_passing_checkpoints_and_releases_lease
     with_rails_cli_project do |project, runtime, cli|
       baseline = learn_cli_baseline(project, runtime, cli)
       project.write(
@@ -525,19 +525,18 @@ class RailsCliAcceptanceTest < Minitest::Test
         extra_env: {"RAILS_ACCEPTANCE_FAIL_TEST" => "1"}
       )
       assert_equal 1, failed.exitstatus, cli_failure("native failure", failed)
-      assert_cli_oracle do
-        MinitestTestmonAcceptance::RailsCliOracle.assert_retained_generation!(
-          baseline,
-          rejected,
-          reason: "test_failure"
-        )
-      end
+      assert_equal false, rejected.dig("publication", "published")
+      assert_equal "test_failure", rejected.dig("publication", "reason")
+      assert_operator rejected.fetch("generation"), :>, baseline.fetch("generation")
+      accepted = rejected.dig("checkpoints", "accepted_ids")
+      refute_empty accepted
+      refute_includes accepted, "CliContractTest#test_controlled_failure"
 
       recovered, recovery_report = run_cli(runtime, cli)
       assert_equal 0, recovered.exitstatus, cli_failure("failure recovery", recovered)
-      assert_equal recovery_report.dig("tests", "discovered"), recovery_report.dig("tests", "selected")
-      assert_equal recovery_report.dig("tests", "discovered"), recovery_report.dig("tests", "executed")
-      assert_equal baseline.fetch("generation") + 1, recovery_report.fetch("generation")
+      assert_equal ["CliContractTest#test_controlled_failure"], recovery_report.dig("tests", "selected")
+      assert_equal recovery_report.dig("tests", "selected"), recovery_report.dig("tests", "executed")
+      assert_equal rejected.fetch("generation") + 1, recovery_report.fetch("generation")
     end
   end
 

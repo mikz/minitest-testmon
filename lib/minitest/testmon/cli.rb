@@ -117,14 +117,28 @@ module Minitest
       def warn_unpublished_report(report)
         return if report&.dig("publication", "published")
 
+        return if report&.dig("checkpoints", "stop_reason") == "source_drift"
         reason = report&.dig("publication", "reason")
         detail = reason ? " (#{reason})" : ""
-        @err.puts "Testmon cache unchanged: evidence could not be safely published#{detail}."
+        accepted = report&.dig("checkpoints", "accepted_ids") || []
+        if accepted.any?
+          @err.puts "Testmon: #{accepted.length} checkpointed tests preserved; remaining evidence could not be safely published#{detail}."
+        else
+          @err.puts "Testmon cache unchanged: evidence could not be safely published#{detail}."
+        end
       end
 
       def valid_testmon_report?(report)
         return false unless report.is_a?(Hash)
-        return false unless report["schema_version"] == 2
+        return false unless [2, 3].include?(report["schema_version"])
+        if report["schema_version"] == 3
+          checkpoints = report["checkpoints"]
+          return false unless checkpoints.is_a?(Hash)
+          return false unless checkpoints["count"].is_a?(Integer) && checkpoints["count"] >= 0
+          return false unless string_array?(checkpoints["accepted_ids"])
+          return false unless checkpoints["accepted_ids"] == checkpoints["accepted_ids"].uniq.sort
+          return false unless checkpoints["stop_reason"].nil? || checkpoints["stop_reason"].is_a?(String)
+        end
         return false unless report["mode"] == "run"
         return false unless [true, false].include?(report["complete"])
         return false unless [true, false].include?(report["ready"])

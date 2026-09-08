@@ -74,6 +74,21 @@ class CheckpointRuntimeTest < TestmonTestCase
     end
   end
 
+  def test_unresolvable_test_definition_does_not_block_other_checkpoints
+    with_checkpoint_project do |project|
+      File.open(File.join(project, "test/example_test.rb"), "a") do |file|
+        file.puts <<~RUBY_TEST
+          CheckpointExample.define_method(:test_10, Kernel.instance_method(:itself))
+        RUBY_TEST
+      end
+      report = finish_run(project)
+      assert_equal 29, snapshots_count(project)
+      assert_nil report.dig("checkpoints", "stop_reason")
+      assert_equal "provider_incomplete", report.dig("publication", "reason")
+      assert_equal ["CheckpointExample#test_10"], finish_run(project).dig("tests", "selected")
+    end
+  end
+
   private
 
   def with_checkpoint_project

@@ -204,7 +204,7 @@ module Minitest
         outcomes.filter_map do |test_id, outcome|
           next unless outcome == :passed
           definition = @snapshot.test_definition_input(test_id)
-          raise PhaseError, "missing_test_definition" unless definition
+          next unless definition
           snapshot = builder.call(
             test_id: test_id, current_inputs: @session.current_inputs,
             claimed_input_ids: @session.claimed_input_ids(test_id),

@@ -215,6 +215,74 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_checkpoint_is_durable_before_completion_and_rejects_foreign_tests_atomically
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, store.revision)
+      store.acquire_lease!(run_id: "partial")
+      store.start_execution(run_id: "partial", selection: selection)
+      first = snapshot(ids.first, input("one", "v1"), "partial")
+      foreign = snapshot("ForeignTest#test_value", input("other", "v1"), "partial")
+      assert_raises(Minitest::Testmon::PhaseError) do
+        store.checkpoint(run_id: "partial", base_revision: nil, snapshots: [first, foreign])
+      end
+      assert_empty store.snapshots_for(ids)
+      assert_nil store.revision
+      store.checkpoint(run_id: "partial", base_revision: nil, snapshots: [first])
+      assert_equal 1, store.revision
+      assert_equal [ids.first], store.checkpoint_progress("partial").fetch("accepted_ids")
+      assert_equal [ids.last], store.retries_for(ids).keys
+      store.release_lease!
+      assert_equal "abandoned", store.runs.first.fetch("state")
+      assert_equal [ids.first], store.snapshots_for(ids).keys
+    end
+  end
+
+  def test_contradictory_completion_revokes_checkpoint_and_forces_retry
+    with_store do |store|
+      id = "OneTest#test_one"
+      selection = selection_for([id], [id], nil)
+      store.acquire_lease!(run_id: "partial")
+      store.start_execution(run_id: "partial", selection: selection)
+      store.checkpoint(run_id: "partial", base_revision: nil,
+        snapshots: [snapshot(id, input("one", "v1"), "partial")])
+      store.invalidate_checkpoint("partial", id)
+      assert_empty store.snapshots_for([id])
+      assert_equal :running, store.retries_for([id]).fetch(id).outcome
+      assert_empty store.checkpoint_progress("partial").fetch("accepted_ids")
+      assert_equal 2, store.revision
+    end
+  end
+
+  def test_supported_schema_migrations_preserve_snapshots_and_retry_state
+    %w[6 7].each do |version|
+      with_project do |project|
+        path = File.join(project, "state.sqlite3")
+        id = "OneTest#test_one"
+        store = Minitest::Testmon::Store.new(path)
+        seed(store, {id => input("one", "v1")})
+        store.acquire_lease!(run_id: "unfinished")
+        store.start_execution(run_id: "unfinished", selection: selection_for([id], [id], store.revision))
+        store.close
+        database = SQLite3::Database.new(path)
+        database.execute("ALTER TABLE run_receipts DROP COLUMN checkpoint_json")
+        database.execute("ALTER TABLE test_inputs DROP COLUMN scope") if version == "6"
+        database.execute("UPDATE metadata SET value=? WHERE key='schema_version'", [version])
+        database.close
+        migrated = Minitest::Testmon::Store.new(path)
+        assert_equal 1, migrated.revision
+        assert_equal [id], migrated.snapshots_for([id]).keys
+        expected_scope = (version == "6") ? :suite : :test
+        assert_equal expected_scope, migrated.snapshots_for([id]).fetch(id).inputs.first.scope
+        assert_equal :running, migrated.retries_for([id]).fetch(id).outcome
+        assert_equal 0, migrated.checkpoint_progress("seed").fetch("count")
+        assert_empty Dir["#{path}.incompatible-*"]
+      ensure
+        migrated&.close
+      end
+    end
+  end
+
   private
 
   def with_store

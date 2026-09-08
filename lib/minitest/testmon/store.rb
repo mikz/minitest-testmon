@@ -14,7 +14,7 @@ module Minitest
     # read-side decision; this class atomically validates and publishes run
     # evidence while owning durable state, leases, and receipts.
     class Store
-      SCHEMA_VERSION = 7
+      SCHEMA_VERSION = 8
       DEFAULT_RETAINED_REPORTS = 10
       SchemaIncompatible = Class.new(StandardError)
 
@@ -168,16 +168,77 @@ module Minitest
         true
       end
 
+      def checkpoint(run_id:, base_revision:, snapshots:)
+        require_owned_lease!
+        transaction do
+          verify_lease!
+          verify_revision!(base_revision)
+          row = @database.get_first_row("SELECT selected_json, state FROM run_receipts WHERE id = ?", [run_id])
+          raise PhaseError, "checkpoint requires the active run" unless row && row["state"] == "running" && @lease_run_id == run_id
+          selected = CanonicalJSON.parse(row.fetch("selected_json"))
+          ids = snapshots.map(&:test_id)
+          raise PhaseError, "duplicate checkpoint test" unless ids.uniq == ids
+          progress = checkpoint_progress(run_id)
+          snapshots.each do |snapshot|
+            unless selected.include?(snapshot.test_id) && snapshot.run_id == run_id &&
+                !progress.fetch("accepted_ids").include?(snapshot.test_id)
+              raise PhaseError, "invalid checkpoint test"
+            end
+            replace_snapshot(snapshot)
+            @database.execute("DELETE FROM retry_tests WHERE test_id = ?", [snapshot.test_id])
+          end
+          unless snapshots.empty?
+            set_metadata("revision", ((revision || 0) + 1).to_s)
+            progress["accepted_ids"] = (progress.fetch("accepted_ids") + snapshots.map(&:test_id)).sort
+            progress["count"] += 1
+            write_progress(run_id, progress)
+          end
+          revision
+        end
+      end
+
+      def checkpoint_progress(run_id)
+        value = @database.get_first_value("SELECT checkpoint_json FROM run_receipts WHERE id = ?", [run_id])
+        value ? CanonicalJSON.parse(value) : {"count" => 0, "accepted_ids" => [], "stop_reason" => nil}
+      end
+
+      def stop_learning(run_id, reason)
+        require_owned_lease!
+        transaction do
+          verify_lease!
+          progress = checkpoint_progress(run_id)
+          progress["stop_reason"] ||= reason.to_s
+          write_progress(run_id, progress)
+        end
+      end
+
+      def invalidate_checkpoint(run_id, test_id)
+        require_owned_lease!
+        transaction do
+          verify_lease!
+          progress = checkpoint_progress(run_id)
+          if progress.fetch("accepted_ids").delete(test_id)
+            @database.execute("DELETE FROM test_snapshots WHERE test_id = ? AND run_id = ?", [test_id, run_id])
+            set_metadata("revision", ((revision || 0) + 1).to_s)
+            write_progress(run_id, progress)
+          end
+          upsert_retry(test_id, :running)
+          revision
+        end
+      end
+
       def publish(evidence)
         require_owned_lease!
         transaction do
           verify_lease!
           verify_revision!(evidence.base_revision)
           if !(evidence.complete && evidence.source_stable && evidence.valid_ledger?)
-            reason = if !evidence.complete
-              evidence.publication_reason || "provider_incomplete"
+            reason = if evidence.publication_reason
+              evidence.publication_reason
             elsif !evidence.source_stable
               "source_drift"
+            elsif !evidence.complete
+              "provider_incomplete"
             else
               "provider_incomplete"
             end
@@ -187,8 +248,9 @@ module Minitest
           elsif !evidence.publishable_snapshots?
             reject_evidence(evidence, "provider_incomplete")
           else
-            next_revision = evidence.passed_ids.empty? ? revision : (revision || 0) + 1
-            evidence.passed_ids.each do |test_id|
+            remaining = evidence.passed_ids - checkpoint_progress(evidence.run_id).fetch("accepted_ids")
+            next_revision = remaining.empty? ? revision : (revision || 0) + 1
+            remaining.each do |test_id|
               replace_snapshot(evidence.snapshots.fetch(test_id))
               @database.execute("DELETE FROM retry_tests WHERE test_id = ?", [test_id])
             end
@@ -249,11 +311,14 @@ module Minitest
         @database.execute(
           <<~SQL,
             SELECT id, mode, state, base_revision, published_revision,
-                   publication_reason, started_at, finished_at
+                   publication_reason, checkpoint_json, started_at, finished_at
             FROM run_receipts ORDER BY started_at DESC LIMIT ?
           SQL
           [Integer(limit)]
-        )
+        ).map do |row|
+          value = row.delete("checkpoint_json")
+          row.merge("checkpoints" => value ? CanonicalJSON.parse(value) : {"count" => 0, "accepted_ids" => [], "stop_reason" => nil})
+        end
       end
 
       def explain(terms = [], generation: revision)
@@ -308,6 +373,7 @@ module Minitest
         if schema_present?
           integrity = @database.get_first_value("PRAGMA integrity_check")
           raise SQLite3::CorruptException, integrity unless integrity == "ok"
+          migrate_checkpoint_schema! if %w[6 7].include?(metadata("schema_version"))
           raise SchemaIncompatible, "schema mismatch" unless metadata("schema_version") == SCHEMA_VERSION.to_s
         elsif database_empty?
           create_schema!
@@ -377,12 +443,30 @@ module Minitest
             publication_reason TEXT,
             report_schema_version INTEGER,
             report_json TEXT,
+            checkpoint_json TEXT,
             started_at TEXT NOT NULL,
             finished_at TEXT
           );
           CREATE INDEX run_receipts_finished ON run_receipts(state, finished_at);
         SQL
         set_metadata("schema_version", SCHEMA_VERSION.to_s)
+      end
+
+      def migrate_checkpoint_schema!
+        transaction do
+          owner = @database.get_first_value("SELECT owner_pid FROM leases WHERE name = 'cache'")
+          raise LeaseUnavailable, "cache_lease_unavailable" if owner && process_alive?(Integer(owner))
+          if metadata("schema_version") == "6"
+            @database.execute("ALTER TABLE test_inputs ADD COLUMN scope TEXT NOT NULL DEFAULT 'suite'")
+          end
+          @database.execute("ALTER TABLE run_receipts ADD COLUMN checkpoint_json TEXT")
+          set_metadata("schema_version", SCHEMA_VERSION.to_s)
+        end
+      end
+
+      def write_progress(run_id, progress)
+        @database.execute("UPDATE run_receipts SET checkpoint_json = ? WHERE id = ?",
+          [CanonicalJSON.generate(progress), run_id])
       end
 
       def quarantine_and_rebuild!(kind)
@@ -470,7 +554,7 @@ module Minitest
 
       def finalize_run(run_id, report, state:)
         return report unless run_id
-        payload = report.to_h
+        payload = report.to_h.merge(checkpoints: checkpoint_progress(run_id))
         unless report.publication[:published]
           inventory = published_inventory
           payload = payload.merge(inventory: inventory) if inventory

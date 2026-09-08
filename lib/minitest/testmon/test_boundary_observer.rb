@@ -46,6 +46,13 @@ module Minitest
           @active.delete(key)
           @collector.finish_test(active[:test_id])
           @session.executed(active[:test_id])
+          test = active[:test]
+          outcome = if test.passed? && !test.skipped?
+            :passed
+          else
+            test.skipped? ? :skipped : :failed
+          end
+          @session.seal_completion(active[:test_id], outcome)
         end
       rescue => error
         @session.record(Observation.build(

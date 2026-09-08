@@ -37,7 +37,7 @@ class HarnessSelfTest < Minitest::Test
     error = assert_raises(MinitestTestmonAcceptance::ReportContract::Violation) do
       MinitestTestmonAcceptance::ReportContract.validate!(report)
     end
-    assert_match "must equal 2", error.message
+    assert_match "must equal 3", error.message
   end
 
   def test_contract_rejects_extra_keys_in_prior_v1_objects
@@ -95,7 +95,8 @@ class HarnessSelfTest < Minitest::Test
   def minimal_report
     categories = ->(keys) { keys.to_h { |key| [key, {"count" => 0, "items" => []}] } }
     {
-      "schema_version" => 2,
+      "schema_version" => 3,
+      "checkpoints" => {"count" => 0, "accepted_ids" => [], "stop_reason" => nil},
       "mode" => "run",
       "complete" => false,
       "ready" => false,

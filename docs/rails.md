@@ -106,6 +106,12 @@ bundle exec minitest-testmon run -- bin/rails test:all
 bundle exec minitest-testmon run --full -- bin/rails test:all
 ```
 
+Passing tests are saved during execution in checkpoints, including Rails process
+workers. A later failure or interruption keeps accepted checkpoints. Testmon
+checks each saved test's input fingerprints on the next run before skipping it.
+If files change during execution, cache learning pauses for that run; earlier
+checkpoints remain. The console reports saved progress and pending retries.
+
 `run` selects the affected tests; a cold cache selects every discovered test.
 `run --full` adds every discovered test with reason `forced` on a warm cache.
 
@@ -242,26 +248,24 @@ class ActiveSupport::TestCase
 end
 ```
 
-The parent process exclusively owns the SQLite lease. It disconnects before a
-fork; workers never open SQLite. Each worker streams a run-scoped JSONL spool
-without retaining the event stream in memory or fsyncing each record. At the
-terminal record it flushes, fsyncs, and atomically seals the spool. After Rails
-shuts down its executor, the parent verifies run ID, worker identity, context
-signature, revision, duplicate results, and the exact selected/executed
-ledger, then merges all worker evidence and publishes once. After a complete
-run is validated and imported, the parent removes exactly that run's UUID
-directory. Incomplete or unvalidated directories remain available for
-conservative recovery. Cleanup derives the workers directory from the canonical
-project root and refuses to recurse through a symlinked `tmp`,
-`minitest-testmon`, workers, or UUID directory.
+The parent process exclusively owns the SQLite lease. It disconnects before
+workers fork and reconnects to commit checkpoints. Workers never open SQLite.
+Each worker streams a run-scoped JSONL spool and seals a separate, synced
+completion frame before delivering each test result to the parent. The parent
+validates the frame's run ID, worker identity, sequence, context, starting
+revision, and outcome before accepting the test in a checkpoint.
 
-A missing, malformed, duplicate, or unsealed worker spool yields
-`publication.reason: "worker_incomplete"`. The prior accepted snapshot revision
-is retained;
-the direct command exits 4, and the next run recovers conservatively. Failure
-to remove a validated run uses the same fail-closed reason and cannot publish a
-new revision. Suite-scoped observations remain diagnostic; their current inputs
-are copied into each passing test snapshot by the parent snapshot builder.
+After Rails shuts down its executor, the parent validates the complete worker
+spools and selected/executed ledger for the final receipt. Earlier checkpoints
+survive missing workers or an incomplete final spool. Only committed SQLite
+snapshots are reused after interruption; incomplete spool fragments are not
+salvaged. Run completeness and cache progress are reported separately, and
+Minitest's exit status remains authoritative.
+
+After a complete run is validated and imported, the parent removes exactly that
+run's UUID directory. Incomplete directories remain for diagnosis. Cleanup
+refuses to recurse through symlinked directory components. A cleanup failure
+rejects final publication while preserving earlier checkpoints.
 
 An explicit `parallelize_me!` is supported when Rails process parallelization
 is active:
@@ -292,9 +296,8 @@ A skipped test has no new snapshot. Its prior accepted snapshot, if any, remains
 unchanged, and retry state selects the test again on every run until it passes.
 Skipped tests do not invalidate complete evidence from other passing tests.
 
-Any assertion failure is different: it rejects publication for the whole run.
-No passing snapshot from that run replaces durable state, the failed test stays
-dirty, and the last accepted revision remains authoritative.
+Assertion failures retain retry state for the failed test. Other tests with
+complete passing evidence can still be checkpointed.
 
 ## Rails validation matrix
 

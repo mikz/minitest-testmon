@@ -16,6 +16,8 @@ module Minitest
         @directory = File.join(directory, run_id)
         @run_id = run_id
         @worker_number = Integer(worker_number)
+        @completion_observations = []
+        @sequence = 0
         @context_signature = context_signature
         @base_revision = base_revision
         FileUtils.mkdir_p(@directory)
@@ -28,11 +30,51 @@ module Minitest
       end
 
       def record_observation(observation)
+        @completion_observations << observation.to_h
         append(type: "observation", value: observation.to_h)
       end
 
       def record_executed(test_id)
         append(type: "executed", test_id: test_id.to_s)
+      end
+
+      # Independent, durable frames survive a later worker crash. SQLite remains
+      # parent-owned. Rename happens before the result is delivered to the parent.
+      def seal_test(test_id, outcome, diagnostics: [])
+        @sequence += 1
+        frame = {
+          run_id: @run_id, worker: @worker_number, pid: Process.pid,
+          context_signature: @context_signature, base_revision: @base_revision,
+          sequence: @sequence, test_id: test_id, outcome: outcome,
+          diagnostics: diagnostics, observations: @completion_observations
+        }
+        name = "test-#{Digest::SHA256.hexdigest(test_id)}-#{@worker_number}-#{Process.pid}-#{@sequence}.json"
+        target = File.join(@directory, name)
+        File.open("#{target}.tmp", File::WRONLY | File::CREAT | File::EXCL, 0o600) do |io|
+          io.write(CanonicalJSON.generate(frame))
+          io.flush
+          io.fsync
+        end
+        File.rename("#{target}.tmp", target)
+        fsync_directory
+        @completion_observations = []
+        true
+      end
+
+      def self.completion(directory:, run_id:, test_id:, outcome:, context_signature:, base_revision:, worker_count:)
+        files = Dir[File.join(directory, run_id, "test-#{Digest::SHA256.hexdigest(test_id)}-*.json")]
+        raise PhaseError, "worker_completion_missing_or_duplicate" unless files.length == 1
+        frame = CanonicalJSON.parse(File.read(files.first))
+        valid = frame["run_id"] == run_id && frame["test_id"] == test_id &&
+          frame["outcome"] == outcome.to_s && frame["context_signature"] == context_signature &&
+          frame["base_revision"] == base_revision && frame["worker"].is_a?(Integer) && (0...worker_count).cover?(frame["worker"]) &&
+          frame["sequence"].is_a?(Integer) && frame["sequence"].positive? &&
+          frame["pid"].is_a?(Integer) && frame["pid"].positive? &&
+          frame["diagnostics"].is_a?(Array)
+        raise PhaseError, "invalid_worker_completion" unless valid
+        observations = frame.fetch("observations").map { |value| deserialize_observation(value) }
+        raise PhaseError, "invalid_worker_completion_owner" if observations.any? { |item| item.test_id && item.test_id != test_id }
+        [observations, frame.fetch("diagnostics"), [frame["worker"], frame["pid"], frame["sequence"]]]
       end
 
       def complete!

@@ -8,6 +8,9 @@ require "time"
 module Minitest
   module Testmon
     class Runtime
+      CHECKPOINT_TESTS = 25
+      CHECKPOINT_SECONDS = 5
+
       attr_reader :selection
 
       def initialize(configuration:, registry:)
@@ -24,6 +27,11 @@ module Minitest
         @suite_input_ids = [].freeze
         @process_parallel = false
         @exit_state = nil
+        @pending_checkpoints = {}
+        @checkpoint_worker_ids = {}
+        @worker_sequences = {}
+        @last_checkpoint_at = monotonic_time
+        @last_progress_at = @last_checkpoint_at
       end
 
       def install(options)
@@ -75,9 +83,13 @@ module Minitest
         end
         @session.retain_suite_input_ids!((@selection.selected == discovered) ? [] : @suite_input_ids)
         @store.start_execution(run_id: @run_id, selection: @selection)
+        @checkpoint_revision = @store.revision
         @selected_tests = @selection.selected
         @session.selected!(@selected_tests)
         apply_selection(options, @selected_tests)
+        reasons = @selection.reasons_by_test.values.map { |items| items.first.split(":").first }.tally
+        warn "Testmon: #{discovered.length - @selected_tests.length} cached, #{@selected_tests.length} selected (#{reasons.map { |reason, count| "#{count} #{reason}" }.join(", ")})."
+        warn "Testmon: provider finalization requires end-of-run cache publication." unless @session.checkpoint_supported?
 
         install_process_worker_hooks if @process_parallel
 
@@ -96,46 +108,132 @@ module Minitest
       def infrastructure_failure!(reason)
         if reason.to_s == "unsupported_parallelism"
           @exit_state[:status] = 4
-        elsif !supervised?
-          warn "Testmon cache unchanged: evidence could not be safely published (#{reason})."
+        elsif !supervised? && @learning_stopped != "source_drift"
+          accepted = @store.connected? ? checkpoint_progress.fetch("accepted_ids").length : 0
+          if accepted.positive?
+            warn "Testmon: #{accepted} checkpointed tests preserved; remaining evidence could not be safely published (#{reason})."
+          else
+            warn "Testmon cache unchanged: evidence could not be safely published (#{reason})."
+          end
         end
         reason
       end
 
-      def evidence(report, outcomes, publication_reason: nil)
+      def record_checkpoint(test_id, outcome, duplicate: false)
+        reconnect_checkpoint_store
+        if duplicate
+          @checkpoint_revision = @store.invalidate_checkpoint(@run_id, test_id)
+          stop_learning("duplicate_test_outcome")
+          return
+        end
+        return if @learning_stopped || !@session.checkpoint_supported?
+        if process_parallel?
+          observations, diagnostics, identity = WorkerSpool.completion(
+            directory: worker_spool_root, run_id: @run_id, test_id: test_id, outcome: outcome,
+            context_signature: @snapshot.signature, base_revision: @selection.base_revision,
+            worker_count: @worker_count
+          )
+          worker, pid, sequence = identity
+          previous = @worker_sequences[worker]
+          if previous && (previous[0] != pid || sequence != previous[1] + 1)
+            raise PhaseError, "invalid_worker_completion_sequence"
+          end
+          raise PhaseError, "invalid_worker_completion_sequence" if !previous && sequence != 1
+          @worker_sequences[worker] = [pid, sequence]
+          observations.each { |item| @session.import_observation(item) }
+          diagnostics.each { |reason| @session.incomplete(reason) }
+          @session.import_executed(test_id)
+          @checkpoint_worker_ids[test_id] = true
+        end
+        @pending_checkpoints[test_id] = outcome if outcome == :passed
+        flush_checkpoints
+      rescue => error
+        stop_learning("provider_incomplete")
+        warn "Testmon checkpoint unavailable: #{error.message}"
+      end
+
+      def flush_checkpoints(force: false)
+        return if @learning_stopped || @pending_checkpoints.empty? || !@session.checkpoint_supported?
+        return unless force || @pending_checkpoints.size >= CHECKPOINT_TESTS || monotonic_time - @last_checkpoint_at >= CHECKPOINT_SECONDS
+        reconnect_checkpoint_store
+        return stop_learning("source_drift") unless @snapshot.source_stable?
+        report = @session.checkpoint_report
+        return stop_learning(report.diagnostics.first || "provider_incomplete") unless report.complete?
+        snapshots = build_snapshots(@pending_checkpoints)
+        return stop_learning("source_drift") unless @snapshot.source_stable?
+        @checkpoint_revision = @store.checkpoint(run_id: @run_id, base_revision: @checkpoint_revision, snapshots: snapshots.values)
+        @pending_checkpoints.clear
+        @last_checkpoint_at = monotonic_time
+        if @last_checkpoint_at - @last_progress_at >= CHECKPOINT_SECONDS
+          warn "Testmon: #{checkpoint_progress.fetch("accepted_ids").length} tests saved."
+          @last_progress_at = @last_checkpoint_at
+        end
+      rescue => error
+        stop_learning("provider_incomplete")
+        warn "Testmon checkpoint unavailable: #{error.message}"
+      end
+
+      def checkpoint_progress
+        @store.checkpoint_progress(@run_id)
+      end
+
+      def cache_summary
+        progress = checkpoint_progress
+        retained = @store.snapshots_for(@discovered).keys - progress.fetch("accepted_ids")
+        warn "Testmon cache: #{progress.fetch("accepted_ids").length} checkpointed, #{retained.length} retained, #{@store.retries_for(@discovered).length} retry."
+      end
+
+      def stop_learning(reason)
+        return if @learning_stopped
+        @learning_stopped = reason.to_s
+        @pending_checkpoints.clear
+        reconnect_checkpoint_store
+        @store.stop_learning(@run_id, reason)
+        if reason.to_s == "source_drift"
+          warn "Testmon: Files changed during this run. Cache learning paused; earlier checkpoints were preserved."
+        else
+          warn "Testmon: Cache learning paused (#{reason}); earlier checkpoints were preserved."
+        end
+      rescue Error, SQLite3::Exception
+        nil
+      end
+
+      def build_snapshots(outcomes)
         recorded_at = Time.now.utc.iso8601(6)
         builder = SnapshotBuilder.new
-        snapshots = outcomes.filter_map do |test_id, outcome|
+        outcomes.filter_map do |test_id, outcome|
           next unless outcome == :passed
-
+          definition = @snapshot.test_definition_input(test_id)
+          next unless definition
           snapshot = builder.call(
-            test_id: test_id,
-            current_inputs: @session.current_inputs,
+            test_id: test_id, current_inputs: @session.current_inputs,
             claimed_input_ids: @session.claimed_input_ids(test_id),
-            test_definition_input: @snapshot.test_definition_input(test_id),
-            recorded_at: recorded_at,
-            run_id: @run_id
+            test_definition_input: definition, recorded_at: recorded_at, run_id: @run_id
           )
           [test_id, snapshot]
         end.to_h
+      end
+
+      def evidence(report, outcomes, publication_reason: nil)
+        snapshots = @learning_stopped ? {} : build_snapshots(outcomes)
         source_stable = @snapshot.source_stable?
         RunEvidence.new(
           run_id: @run_id,
-          base_revision: @selection.base_revision,
+          base_revision: @checkpoint_revision,
           report: report,
           selection: @selection,
           outcomes: outcomes,
           snapshots: snapshots,
-          complete: report.complete?,
+          complete: report.complete? && !@learning_stopped,
           source_stable: source_stable,
-          publication_reason: publication_reason
+          publication_reason: (@learning_stopped && ((@learning_stopped == "source_drift") ? "source_drift" : "provider_incomplete")) || publication_reason
         )
       end
 
       def merge_worker_spools!
         return unless process_parallel?
         raise PhaseError, "only the original parent may merge worker evidence" unless Process.pid == @parent_pid
-        @store.reconnect!
+        reconnect_checkpoint_store
         merged = WorkerSpool.merge(
           directory: worker_spool_root,
           run_id: @run_id,
@@ -145,7 +243,7 @@ module Minitest
           expected_tests: @selected_tests
         )
         merged.observations.each { |observation| @session.import_observation(observation) }
-        merged.executed.each { |test_id| @session.import_executed(test_id) }
+        merged.executed.each { |test_id| @session.import_executed(test_id) unless @checkpoint_worker_ids[test_id] }
         if merged.complete
           @session.incomplete(:worker_incomplete) unless discard_validated_worker_run!
         else
@@ -154,6 +252,14 @@ module Minitest
       end
 
       private
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def reconnect_checkpoint_store
+        @store.reconnect! unless @store.connected?
+      end
 
       def supervised?
         ENV.key?("MINITEST_TESTMON_RUN_ID")
@@ -427,13 +533,16 @@ module Minitest
         else
           (result.skipped? ? :skipped : :failed)
         end
+        @runtime.record_checkpoint(test_id, @outcomes[test_id], duplicate: @outcome_counts[test_id] > 1)
       end
 
       def report
+        @runtime.flush_checkpoints(force: true)
         @runtime.merge_worker_spools!
         report = @session.finalize
         evidence = @runtime.evidence(report, @outcomes)
         published = @store.publish(evidence)
+        @runtime.cache_summary
         @runtime.infrastructure_failure!(published.publication[:reason]) if !published.publication[:published] &&
           published.publication[:reason] != "test_failure"
       rescue => error

@@ -22,7 +22,8 @@ class StorageAcceptanceTest < Minitest::Test
       failed_report = driver.report(project)
       assert_report_contract failed_report
       assert_equal false, failed_report.dig("publication", "published")
-      assert_equal generation, failed_report.fetch("generation")
+      assert_operator failed_report.fetch("generation"), :>, generation
+      refute_empty failed_report.dig("checkpoints", "accepted_ids")
 
       project.write("lib/subject.rb", original)
       repaired = driver.run(project)
@@ -32,7 +33,7 @@ class StorageAcceptanceTest < Minitest::Test
       alpha_id = find_test_id(repaired_report, "test_alpha")
       assert_includes repaired_report.dig("tests", "executed"), alpha_id,
         "failed test was not retained dirty for the recovery run"
-      assert_equal generation + 1, repaired_report.fetch("generation")
+      assert_equal failed_report.fetch("generation") + 1, repaired_report.fetch("generation")
       assert_sqlite_integrity driver.state_path(project)
     end
   end

@@ -36,7 +36,7 @@ class DiscoveryReportTest < TestmonTestCase
       observation_claims: {observation.key => [artifact.key]}
     ).published(4)
 
-    expected_keys = %i[schema_version mode complete ready diagnostics generation context_signature bundles tests observations inventory suggestions publication]
+    expected_keys = %i[schema_version mode complete ready diagnostics generation context_signature bundles tests observations inventory suggestions publication checkpoints]
     assert_equal expected_keys.sort, report.to_h.keys.sort
     assert_equal true, report.to_h.fetch(:complete)
     assert_empty report.to_h.fetch(:diagnostics)

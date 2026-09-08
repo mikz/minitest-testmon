@@ -126,31 +126,47 @@ selected and executed lists to match exactly and rejects duplicate outcomes.
 
 ## Publication
 
-The parent records execution intent before tests start. Publication is one
-SQLite transaction and is accepted only when:
+The parent records execution intent before tests start. Selected tests receive
+retry flags before any execution. Passing tests can clear their flags only when
+complete dependency evidence has been accepted in a checkpoint.
 
-- the provider and worker evidence is complete;
-- the source/inventory snapshot is unchanged from start to finish;
-- selected tests executed exactly once and outcomes cover the exact ledger;
-- every passing test has a complete snapshot containing only known inputs; and
-- no selected test failed.
+At result boundaries, Testmon checkpoints after 25 pending passing tests or five
+seconds since the previous checkpoint. Normal completion flushes the remainder.
+Each checkpoint validates the original source, inventory, and configuration
+snapshot before and after building dependency snapshots. The SQLite transaction
+replaces accepted snapshots, clears their retry flags, advances the current
+revision, and records the accepted IDs together. The run's starting revision
+remains unchanged in its receipt and worker identities.
 
-On acceptance, each passing test atomically replaces only its own snapshot and
-input rows. Omitted tests are untouched. Skipped tests retain retry state and are
-selected again. On any test failure, the entire run is rejected: no passing
-snapshot from that run replaces durable dependency state. The failure is kept as
-retry state and the last accepted revision remains authoritative.
+Claims are processed incrementally without closing active observers. Providers
+with a finalization hook retain final-only publication because their evidence
+cannot be certified while they are still observing.
 
-This atomic-on-any-failure rule is stricter than per-test isolation requires,
-but it is the public contract and keeps one simple definition of an accepted
-run. Incomplete evidence, source drift, worker loss, a ledger mismatch, or lease
-failure is rejected the same way.
+Source drift stops further learning for the run. Pending results are discarded;
+earlier checkpoints remain. The next run still compares their fingerprints
+against current inputs. Test failures do not discard unrelated passing
+checkpoints. Skipped, unfinished, and unverified tests retain retry state.
+Duplicate or contradictory outcomes revoke the implicated checkpoint and force
+a retry.
+
+Run completion and cache progress are separate. A failed or abandoned run can
+have accepted checkpoints without certifying a successful suite. Receipt schema
+3 includes `checkpoints.count`, `checkpoints.accepted_ids`, and
+`checkpoints.stop_reason`. SQLite schema 8 adds checkpoint receipt metadata;
+versions 6 and 7 migrate transactionally without deleting cached snapshots.
+Version 6 inputs conservatively migrate as suite inputs because they lack scope.
 
 ## Parallelism
 
 Serial execution has one active coverage boundary. Rails process workers each
-record observations and exact executed IDs to a run-scoped spool; workers do not
-open SQLite. The parent validates all spools and publishes once. An explicit
+record observations and exact executed IDs to a run-scoped spool. Each completed
+test also seals an atomic, synced completion frame before its result reaches the
+parent. The parent checks the frame identity, outcome, and worker sequence before
+including it in a checkpoint. Workers do not open SQLite.
+
+A missing or incomplete frame cannot become a checkpoint. After parent death,
+only committed SQLite checkpoints are reused; uncommitted frames are not
+salvaged. Final spool validation still determines whether the run completed. An explicit
 `parallelize_me!` uses that supported path when Rails process parallelization is
 active. Thread-backed Minitest parallel tests and Rails thread workers are
 rejected because Ruby Coverage and framework notifications are process-global
@@ -164,4 +180,5 @@ and overlapping test boundaries cannot be attributed safely.
 4. An omitted test's snapshot is never refreshed by another test.
 5. Membership and other suite inputs are explicit inputs copied into snapshots,
    not hidden global state.
-6. Any failed or incomplete run preserves the previous accepted snapshots.
+6. Failures and interruptions preserve accepted checkpoints; contradictory evidence
+   for an accepted test revokes its checkpoint and forces a retry.

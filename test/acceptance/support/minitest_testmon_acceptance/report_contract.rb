@@ -4,7 +4,7 @@ module MinitestTestmonAcceptance
   class ReportContract
     TOP_LEVEL_KEYS = %w[
       schema_version mode complete ready diagnostics generation context_signature
-      bundles tests observations inventory suggestions publication
+      bundles tests observations inventory suggestions publication checkpoints
     ].freeze
     TEST_KEYS = %w[discovered selected executed].freeze
     OBSERVATION_KEYS = %w[claimed ignored uncovered unresolved].freeze
@@ -39,7 +39,7 @@ module MinitestTestmonAcceptance
       object!(report, "report")
       exact_keys!(report, TOP_LEVEL_KEYS, "report")
 
-      fail!("schema_version must equal 2") unless report.fetch("schema_version") == 2
+      fail!("schema_version must equal 3") unless report.fetch("schema_version") == 3
       string!(report.fetch("mode"), "mode")
       boolean!(report.fetch("complete"), "complete")
       boolean!(report.fetch("ready"), "ready")
@@ -53,6 +53,12 @@ module MinitestTestmonAcceptance
       validate_categories!(report.fetch("observations"), OBSERVATION_KEYS, :observation)
       validate_categories!(report.fetch("inventory"), INVENTORY_KEYS, :inventory)
       validate_publication!(report.fetch("publication"))
+      checkpoints = report.fetch("checkpoints")
+      object!(checkpoints, "checkpoints")
+      exact_keys!(checkpoints, %w[count accepted_ids stop_reason], "checkpoints")
+      fail!("checkpoint count must be nonnegative") unless checkpoints["count"].is_a?(Integer) && checkpoints["count"] >= 0
+      sorted_string_array!(checkpoints.fetch("accepted_ids"), "checkpoints.accepted_ids")
+      nullable_string!(checkpoints.fetch("stop_reason"), "checkpoints.stop_reason")
       fail!("complete report cannot contain diagnostics") if report.fetch("complete") && !report.fetch("diagnostics").empty?
       expected_ready = report.fetch("complete") && report.dig("publication", "published")
       fail!("ready must equal complete && publication.published") unless report.fetch("ready") == expected_ready

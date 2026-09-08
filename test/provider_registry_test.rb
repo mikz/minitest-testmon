@@ -22,6 +22,52 @@ class ProviderRegistryTest < TestmonTestCase
     end
   end
 
+  def test_repeated_source_validation_detects_same_size_edits_and_membership_changes
+    with_project do |project|
+      path = write_file(File.join(project, "lib/account.rb"), "class Account; X = 1; end\n")
+      original_time = File.mtime(path)
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      assert snapshot.source_stable?
+      assert snapshot.source_stable?
+      File.write(path, "class Account; X = 2; end\n")
+      File.utime(original_time, original_time, path)
+      refute snapshot.source_stable?
+      File.write(path, "class Account; X = 1; end\n")
+      assert snapshot.source_stable?
+      write_file(File.join(project, "lib/new.rb"), "NEW = true\n")
+      refute snapshot.source_stable?
+    end
+  end
+
+  def test_checkpoints_and_final_report_claim_each_observation_once
+    with_project do |project|
+      path = write_file(File.join(project, "templates/invoice.txt"), "total")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :templates, version: 1 do
+        inventory :templates, root: :project, include: "templates/**/*.txt"
+        facet :content, inventory: :templates, digest: :content, granularity: :file
+        claim :template_read, to: %i[templates content], path: :path
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      provider = snapshot.registrations.first.provider
+      original_claim = provider.method(:claim)
+      calls = 0
+      provider.define_singleton_method(:claim) do |observation, claims|
+        calls += 1
+        original_claim.call(observation, claims)
+      end
+      session = snapshot.observe
+      session.record(Minitest::Testmon::Observation.build(kind: :template_read,
+        provider: :templates, path: path, test_id: "InvoiceTest#test_total"))
+      assert session.checkpoint_report.complete?
+      assert session.checkpoint_report.complete?
+      assert session.finalize.complete?
+      assert_equal 1, calls
+    end
+  end
+
   def test_test_definition_is_an_ordinary_claimed_input
     with_project do |project|
       source = write_file(File.join(project, "test", "generated_definition_test.rb"), <<~RUBY)
@@ -48,6 +94,21 @@ class ProviderRegistryTest < TestmonTestCase
       assert session.claimed_input_ids_by_test.frozen?
     ensure
       Object.send(:remove_const, :GeneratedDefinitionTest) if Object.const_defined?(:GeneratedDefinitionTest, false)
+    end
+  end
+
+  def test_provider_finalization_disables_early_checkpoint_publication
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      finalized = false
+      snapshot.registrations.first.provider.define_singleton_method(:finalize) { |_claims| finalized = true }
+      session = snapshot.observe
+      refute session.checkpoint_supported?
+      refute finalized
+      assert session.finalize.complete?
+      assert finalized
     end
   end
 

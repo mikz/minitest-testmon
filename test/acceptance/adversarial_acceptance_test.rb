@@ -168,7 +168,11 @@ class AdversarialAcceptanceTest < Minitest::Test
       refute result.success?, "planted incomplete discovery exited zero"
       report = driver.report(project)
       assert_report_contract report
-      assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(baseline, report)
+      assert_equal false, report.dig("publication", "published")
+      assert_operator report.fetch("generation"), :>, baseline.fetch("generation")
+      accepted = report.dig("checkpoints", "accepted_ids")
+      refute_empty accepted
+      refute_includes accepted, "IncompleteDiscoveryTest#test_planted_failure_with_uncovered_input"
       refute_empty report.fetch("suggestions")
       assert report.fetch("suggestions").any? { |suggestion| suggestion.fetch("code") == "uncovered_file" }
     end
@@ -344,7 +348,7 @@ class AdversarialAcceptanceTest < Minitest::Test
       assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
         baseline,
         report,
-        reason: "provider_incomplete"
+        reason: "source_drift"
       )
 
       recovery, recovery_report = run_adversarial(project, env: recovered_env(kind))
@@ -377,7 +381,7 @@ class AdversarialAcceptanceTest < Minitest::Test
         assert MinitestTestmonAcceptance::AdversarialOracle.assert_preserved_unpublished!(
           baseline,
           report,
-          reason: "provider_incomplete"
+          reason: "source_drift"
         )
       ensure
         release.write("release") unless release.exist?

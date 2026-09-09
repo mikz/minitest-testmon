@@ -185,6 +185,46 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
+  def test_constant_plans_reuse_parsing_but_resolve_redefinitions_and_aliases_live
+    with_project do |project|
+      first = write_file(File.join(project, "first.rb"), "module TESTMON_PLAN_OWNER; VALUE = 7; end\nTESTMON_PLAN_ALIAS = TESTMON_PLAN_OWNER\n")
+      second = write_file(File.join(project, "second.rb"), "TESTMON_PLAN_OWNER.const_set(:VALUE, 8)\n")
+      third = write_file(File.join(project, "third.rb"), "module TESTMON_PLAN_OTHER; VALUE = 9; end\nTESTMON_PLAN_ALIAS = TESTMON_PLAN_OTHER\n")
+      reader = write_file(File.join(project, "reader.rb"), "TESTMON_PLAN_ALIAS::VALUE\n")
+      load first
+      callable = -> {
+        load reader
+        TESTMON_PLAN_ALIAS::VALUE
+      }
+      session = RecordingSession.new
+      resolver = Minitest::Testmon::PathResolver.new(project: project)
+      observer = Minitest::Testmon::CoreObserver.new(session, resolver: resolver, observe_files: false).start
+      locator = resolver.resolve(reader)
+      lines = observer.send(:target_constant_lines, locator)
+      assert_same lines, observer.send(:target_constant_lines, locator)
+      assert lines.frozen?
+      assert_equal({1 => true}, lines)
+      Minitest::Testmon::ExecutionContext.with_test("Plans#first") { assert_equal 7, callable.call }
+      TESTMON_PLAN_OWNER.send(:remove_const, :VALUE)
+      Minitest::Testmon::ExecutionContext.with_test("Plans#missing") { assert_raises(NameError) { callable.call } }
+      load second
+      Minitest::Testmon::ExecutionContext.with_test("Plans#second") { assert_equal 8, callable.call }
+      Object.send(:remove_const, :TESTMON_PLAN_ALIAS)
+      load third
+      Minitest::Testmon::ExecutionContext.with_test("Plans#third") { assert_equal 9, callable.call }
+      reads = session.observations.select { |item| item.operation == :constant_read }
+      %w[first second third].zip([first, second, third]).each do |name, path|
+        assert_includes reads.select { |item| item.test_id == "Plans##{name}" }.map(&:path), File.realpath(path)
+      end
+      refute reads.any? { |item| item.test_id == "Plans#missing" }
+    ensure
+      observer&.close
+      %i[TESTMON_PLAN_ALIAS TESTMON_PLAN_OWNER TESTMON_PLAN_OTHER].each do |name|
+        Object.send(:remove_const, name) if Object.const_defined?(name, false)
+      end
+    end
+  end
+
   def test_configured_ruby_paths_are_canonicalized_once_and_then_served_from_the_allowlist
     with_project do |project|
       script = write_file(File.join(project, "reader.rb"), "VALUE = 1\n")

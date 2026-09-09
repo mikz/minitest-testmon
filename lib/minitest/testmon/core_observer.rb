@@ -47,6 +47,7 @@ module Minitest
         @native_execution_gate = {}
         @native_source_locations = {}
         @source_lines = {}
+        @constant_reference_plans = {}
       end
 
       def start
@@ -211,9 +212,7 @@ module Minitest
 
       def target_constant_lines(locator)
         return unless locator
-        source_lines(locator.absolute_path).each_with_index.each_with_object({}) do |(line, index), lines|
-          lines[index + 1] = true if CONSTANT_REFERENCE.match?(line)
-        end.freeze
+        constant_reference_plan(locator.absolute_path).first
       rescue SystemCallError, ArgumentError
         nil
       end
@@ -223,11 +222,11 @@ module Minitest
         return unless test_id
         callsite_locator = ruby_source || ruby_locator(event.path)
         return unless callsite_locator
-        line = source_lines(callsite_locator.absolute_path)[event.lineno.to_i - 1]
-        return unless line
+        references = constant_reference_plan(callsite_locator.absolute_path).last[event.lineno.to_i - 1]
+        return unless references
 
-        line.scan(CONSTANT_REFERENCE).uniq.each do |constant_name|
-          location = constant_source_location(constant_name)
+        references.each do |constant_name, parts|
+          location = constant_source_location(parts)
           next unless location
           source_locator = ruby_locator(location[0])
           next unless source_locator
@@ -250,9 +249,22 @@ module Minitest
         @source_lines[path] ||= File.binread(path).lines
       end
 
-      def constant_source_location(name)
+      def constant_reference_plan(path)
+        @constant_reference_plans[path] ||= begin
+          constant_lines = {}
+          references = source_lines(path).each_with_index.map do |line, index|
+            parsed = line.scan(CONSTANT_REFERENCE).uniq.map do |name|
+              [name.freeze, name.split("::").map(&:freeze).freeze].freeze
+            end.freeze
+            constant_lines[index + 1] = true unless parsed.empty?
+            parsed
+          end.freeze
+          [constant_lines.freeze, references].freeze
+        end
+      end
+
+      def constant_source_location(parts)
         owner = Object
-        parts = name.split("::")
         parts.each_with_index do |part, index|
           break unless owner.is_a?(Module) && owner.const_defined?(part, false)
           location = owner.const_source_location(part, false)

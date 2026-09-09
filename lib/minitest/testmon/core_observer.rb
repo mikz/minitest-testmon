@@ -3,6 +3,7 @@
 module Minitest
   module Testmon
     class CoreObserver
+      attr_reader :native_source_locations
       DIRECT_READS = %i[read binread readlines foreach].freeze
       INSTANCE_READS = %i[read readpartial sysread each_line gets readline readlines].freeze
       FILE_CALLS = (DIRECT_READS + INSTANCE_READS + [:load]).to_h { |name| [name, true] }.freeze
@@ -44,8 +45,7 @@ module Minitest
         @unattributed_execution = {}
         @ruby_execution = {}
         @native_execution_gate = {}
-        @native_project_methods = {}
-        @native_project_method_names = FILE_CALLS.dup
+        @native_source_locations = {}
         @source_lines = {}
       end
 
@@ -56,13 +56,12 @@ module Minitest
 
         events = %i[script_compiled]
         events.concat(%i[c_call c_return]) if @observe_files
-        @trace = TracePointFactory.build(events, c_call: @native_project_method_names, c_return: {load: true, initialize: File}) { |event| observe(event) }
+        @trace = TracePointFactory.build(events, c_call: FILE_CALLS, c_return: {load: true, initialize: File}) { |event| observe(event) }
         @trace.enable
         install_existing_project_targets
-        if !@observe_files && !@native_project_methods.empty?
-          @native_trace = TracePointFactory.build([:c_call], c_call: @native_project_method_names) { |event| observe(event) }
-          @native_trace.enable
-        end
+        # This is the same startup-only inventory as the native method index it
+        # replaces. Script compilation continues to install Ruby targets below.
+        @native_source_locations.freeze
         self
       rescue
         close
@@ -73,7 +72,6 @@ module Minitest
         return if @closed
         @closed = true
         @trace&.disable
-        @native_trace&.disable
         @target_traces&.each_value(&:disable)
       end
 
@@ -85,7 +83,7 @@ module Minitest
         # looking up attribution or receiver identity on this per-call path.
         if event_kind == :c_call
           method_name = event.method_id
-          return unless @native_project_method_names.key?(method_name) || FILE_CALLS.key?(method_name)
+          return unless FILE_CALLS.key?(method_name)
         elsif event_kind == :c_return
           method_name = event.method_id
           return unless method_name == :load || method_name == :initialize
@@ -271,17 +269,6 @@ module Minitest
           return
         end
 
-        native_source = @native_project_methods[[ObjectIdentity.id(event.defined_class), event.method_id]]
-        if native_source
-          record_ruby_execution(
-            native_source.fetch(:path),
-            event,
-            line: native_source.fetch(:line),
-            operation: :native_method_call
-          )
-          return
-        end
-
         return unless @observe_files
 
         if File === receiver && INSTANCE_READS.include?(event.method_id)
@@ -427,11 +414,7 @@ module Minitest
             if iseq
               install_target(iseq, locator:)
             else
-              @native_project_method_names[method_name] = true
-              @native_project_methods[[ObjectIdentity.id(owner), method_name]] = {
-                path: locator.absolute_path,
-                line: Integer(location[1])
-              }.freeze
+              @native_source_locations[locator.absolute_path] ||= Integer(location[1])
             end
           rescue NameError, TypeError
             next

@@ -50,7 +50,7 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
-  def test_disabled_file_observation_keeps_project_accessors_without_generic_io
+  def test_disabled_file_observation_exposes_shared_accessor_sources_without_native_callbacks
     with_project do |project|
       data = write_file(File.join(project, "data.txt"), "payload")
       attributes = write_file(File.join(project, "attributes.rb"), <<~RUBY)
@@ -82,7 +82,9 @@ class CoreObserverTest < TestmonTestCase
         assert_equal observe_files, generic.any? { |observation| observation.reason == :opaque_c_call }
         assert_empty generic unless observe_files
         native = session.observations.select { |observation| observation.operation == :native_method_call }
-        assert_equal ["FileGateTest#read", "FileGateTest#value"], native.map(&:test_id).sort
+        assert_empty native
+        assert_equal [File.realpath(attributes)], observer.native_source_locations.keys
+        assert_nil observer.instance_variable_get(:@native_trace)
       ensure
         observer&.close
       end

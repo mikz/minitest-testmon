@@ -60,7 +60,7 @@ module Minitest
           allowed_roots: core_roots,
           allowed_paths: core_paths
         )
-        @session.attach_observer(CoreObserver.new(
+        core_observer = CoreObserver.new(
           @session,
           resolver: @snapshot.context.resolver,
           allowed_roots: core_roots,
@@ -69,7 +69,9 @@ module Minitest
           test_only: true,
           observe_files: @force_full || @snapshot.claims_event?(:file_open, :file_read),
           boundary_tracker: @collector
-        ).start)
+        ).start
+        @session.attach_observer(core_observer)
+        promote_native_sources(core_observer.native_source_locations)
         @process_parallel = rails_process_parallel?
         reject_unsupported_parallelism!(discovered)
 
@@ -342,6 +344,7 @@ module Minitest
       end
 
       def current_inputs
+        return @native_source_inputs if @native_source_inputs
         return @snapshot.current_inputs if @snapshot.respond_to?(:current_inputs)
 
         @snapshot.context.artifacts.map do |artifact|
@@ -355,6 +358,39 @@ module Minitest
             members: artifact.members,
             scope: artifact.scope
           )
+        end
+      end
+
+      def promote_native_sources(locations)
+        ids = {}
+        matched = {}
+        ruby_provider = @snapshot.registrations.find { |registration| registration.name.to_sym == :ruby }
+        provider = ruby_provider&.provider
+        definition = provider.definition if provider.respond_to?(:definition)
+        provider_id = definition.id.to_s if definition.respond_to?(:id)
+        @snapshot.context.artifacts.each do |artifact|
+          next unless artifact.provider.to_s == provider_id && artifact.whole_file? && artifact.root && artifact.relative_path
+          path = File.expand_path(artifact.relative_path, @snapshot.context.resolver.root(artifact.root))
+          next unless locations.key?(path)
+          ids[artifact.to_input.id] = true
+          matched[path] = true
+        end
+        unless matched.length == locations.length
+          @session.startup_incomplete(:provider_incomplete)
+        end
+        @native_source_inputs = current_inputs.map do |input|
+          ids.key?(input.id) ? input.with(scope: :suite) : input
+        end.freeze
+        # Missing shared sources must select previously cached tests before any
+        # execution, including sources newly added to the startup census.
+        @suite_input_ids = (@suite_input_ids + ids.keys).uniq.sort_by(&:to_s).freeze
+        locations.each do |path, line|
+          @session.record(Observation.build(
+            kind: :coverage_lines,
+            path: path,
+            operation: :native_source_shared,
+            details: {lines: [line]}
+          ).as_suite_evidence)
         end
       end
 

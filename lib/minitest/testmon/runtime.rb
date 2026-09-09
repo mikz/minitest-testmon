@@ -419,8 +419,6 @@ module Minitest
 
       def install_process_worker_hooks
         parallelization = ActiveSupport::Testing::Parallelization
-        bridge = TestBoundaryObserver::WorkerBridge
-        parallelization::Worker.prepend(bridge) unless parallelization::Worker.ancestors.include?(bridge)
         parallelization.before_fork_hook { before_worker_fork! }
         parallelization.after_fork_hook { |worker_number| after_worker_fork!(worker_number) }
         parallelization.run_cleanup_hook { |_worker_number| complete_worker! }

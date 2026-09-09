@@ -304,31 +304,79 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_partial_path_and_name_invocations_fail_without_testmon_state
+  def test_focused_paths_and_names_publish_without_claiming_omitted_tests
+    with_rails_cli_project do |_project, runtime, cli|
+      id = "WidgetTest#test_declared_fixture"
+      env = runtime.env.merge("MINITEST_TESTMON" => "1", "MINITEST_TESTMON_DB" => cli.state_path.to_s)
+      cold = cli.plain(env:, arguments: ["test/models/widget_test.rb"])
+      report = cli.report if cli.state_path.file?
+      assert cold.success?, cli_failure("focused path", cold)
+      assert_equal [id], report.dig("tests", "discovered")
+      assert_equal [id], report.dig("tests", "executed")
+      assert report.dig("publication", "published")
+      warm = cli.plain(env:, arguments: ["--name", "test_declared_fixture"])
+      report = cli.report if cli.state_path.file?
+      assert warm.success?, cli_failure("focused name", warm)
+      assert_equal [id], report.dig("tests", "discovered")
+      assert_empty report.dig("tests", "selected")
+      remaining, report = run_cli(runtime, cli)
+      assert remaining.success?, cli_failure("remaining suite", remaining)
+      refute_includes report.dig("tests", "selected"), id
+      assert_operator report.dig("tests", "selected").length, :>, 1
+      assert report.dig("publication", "published")
+    end
+  end
+
+  def test_line_filters_do_not_readd_cached_tests
     with_rails_cli_project do |project, runtime, cli|
-      cases = [
-        ["path", ["test/unrelated_test.rb"]],
-        ["name", ["--name", "test_unrelated"]]
-      ]
-
-      cases.each do |label, arguments|
-        marker = project.path.join("tmp/rejected-#{label.tr(" ", "-")}")
-        result = cli.flagged(
-          env: runtime.env.merge("RAILS_ACCEPTANCE_TEST_MARKER" => marker.to_s),
-          arguments:
-        )
-
-        assert_cli_oracle do
-          MinitestTestmonAcceptance::RailsCliOracle.assert_native_partial_rejection!(
-            result,
-            marker:,
-            state_files: cli.state_files,
-            report_exists: false
-          )
+      path = "test/models/line_filter_test.rb"
+      source = <<~RUBY
+        require "test_helper"
+        class LineFilterTest < ActiveSupport::TestCase
+          test "first case" do
+            assert_equal 2, 1 + 1
+          end
+          test "second case" do
+            assert_equal 4, 2 + 2
+          end
         end
-      rescue Minitest::Assertion => error
-        flunk "#{label}: #{error.message}"
-      end
+      RUBY
+      project.write(path, source)
+      env = runtime.env.merge("MINITEST_TESTMON" => "1", "MINITEST_TESTMON_DB" => cli.state_path.to_s)
+      first = source.lines.find_index { |line| line.include?("first case") } + 1
+      last = source.lines.find_index { |line| line.include?("second case") } + 1
+      cold = cli.plain(env:, arguments: ["#{path}:#{first}"])
+      assert cold.success?, cli_failure("single line", cold)
+      assert_equal ["LineFilterTest#test_first_case"], cli.report.dig("tests", "executed")
+      partial = cli.plain(env:, arguments: ["#{path}:#{first}-#{last}"])
+      assert partial.success?, cli_failure("line range with cached test", partial)
+      assert_equal ["LineFilterTest#test_second_case"], cli.report.dig("tests", "selected")
+      assert_equal ["LineFilterTest#test_second_case"], cli.report.dig("tests", "executed")
+      assert cli.report.dig("publication", "published")
+      warm = cli.plain(env:, arguments: [path, "--name", "first case"])
+      assert warm.success?, cli_failure("declarative name", warm)
+      assert_equal ["LineFilterTest#test_first_case"], cli.report.dig("tests", "discovered")
+      assert_empty cli.report.dig("tests", "selected")
+    end
+  end
+
+  def test_database_prepare_followed_by_system_task_publishes_and_warms
+    with_rails_cli_project do |_project, runtime, cli|
+      env = runtime.env.merge("MINITEST_TESTMON" => "1", "MINITEST_TESTMON_DB" => cli.state_path.to_s)
+      cold = cli.plain(env:, command: "db:test:prepare", arguments: ["test:system"])
+      assert cold.success?, cli_failure("prepare and system task", cold)
+      report = cli.report
+      assert report.dig("publication", "published")
+      ids = report.dig("tests", "selected")
+      assert_equal 2, ids.length
+      assert ids.all? { |id| id.start_with?("DashboardSystemTest#") }
+      warm = cli.plain(env:, command: "db:test:prepare", arguments: ["test:system"])
+      assert warm.success?, cli_failure("warm system task", warm)
+      assert_empty cli.report.dig("tests", "selected")
+      remaining, report = run_cli(runtime, cli, command: "test:all")
+      assert remaining.success?, cli_failure("remaining all suite", remaining)
+      assert_empty ids & report.dig("tests", "selected")
+      assert report.dig("publication", "published")
     end
   end
 
@@ -429,30 +477,12 @@ class RailsCliAcceptanceTest < Minitest::Test
     FileUtils.remove_entry(alternate_root) if alternate_root&.exist?
   end
 
-  def test_thor_test_subcommand_rejects_after_rails_required_test_prepare_preflight
-    with_rails_cli_project do |project, runtime, cli|
-      learn_cli_baseline(project, runtime, cli)
-      baseline = cli.snapshot
-      test_marker = project.path.join("tmp/thor-test-models-test-marker")
-      task_marker = project.path.join("tmp/thor-test-models-task-marker")
-      result = cli.flagged(
-        env: runtime.env.merge(
-          "RAILS_ACCEPTANCE_TEST_MARKER" => test_marker.to_s,
-          "RAILS_ACCEPTANCE_TASK_MARKER" => task_marker.to_s
-        ),
-        command: "test:models"
-      )
-
-      assert_cli_oracle do
-        MinitestTestmonAcceptance::RailsCliOracle.assert_rejected_unchanged!(
-          result,
-          before: baseline,
-          after: cli.snapshot,
-          marker: test_marker
-        )
-      end
-      assert task_marker.exist?,
-        "Rails did not run its required test:prepare preflight before rejecting test:models"
+  def test_thor_test_subcommand_selects_only_its_requested_tests
+    with_rails_cli_project do |_project, runtime, cli|
+      result, report = run_cli(runtime, cli, command: "test:models")
+      assert result.success?, cli_failure("test:models", result)
+      assert report.dig("publication", "published")
+      assert_equal ["ManualFixtureTest#test_manual_fixture_load", "WidgetTest#test_declared_fixture"], report.dig("tests", "selected")
     end
   end
 

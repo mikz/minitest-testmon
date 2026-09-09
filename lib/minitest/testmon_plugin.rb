@@ -11,11 +11,7 @@ module Minitest
     return if options[:minitest_testmon_options_registered]
 
     options[:minitest_testmon_options_registered] = true
-    options[:minitest_testmon_exit_state] = {status: nil}
-    Minitest.after_run do
-      status = options.dig(:minitest_testmon_exit_state, :status)
-      raise SystemExit.new(status) if status
-    end
+    initialize_testmon_exit_state!(options)
     options[:testmon] ||= Minitest::Testmon::Environment.enabled?
     parser.on("--testmon[=VALUE]", "Enable minitest-testmon") do |value|
       options[:testmon_explicit] = true
@@ -35,7 +31,22 @@ module Minitest
     end
   end
 
+  def self.initialize_testmon_exit_state!(options)
+    return if options[:minitest_testmon_exit_state]
+
+    options[:minitest_testmon_exit_state] = {status: nil}
+    Minitest.after_run do
+      status = options.dig(:minitest_testmon_exit_state, :status)
+      raise SystemExit.new(status) if status
+    end
+  end
+
   def self.plugin_testmon_init(options)
+    # Rails skips test:prepare for paths and names, loading the application
+    # from test_helper after option parsing. Environment activation must also
+    # initialize a plugin registered during that test-loading phase.
+    options[:testmon] ||= Minitest::Testmon::Environment.enabled?
+    initialize_testmon_exit_state!(options)
     reject_testmon_usage!(options)
     return unless options[:testmon]
     return if options[:minitest_testmon_initialized]
@@ -62,17 +73,6 @@ module Minitest
     auxiliary_without_activation = !options[:testmon] && options[:testmon_database_given]
     message = options[:testmon_usage_error]
     message ||= "--testmon-db requires --testmon" if auxiliary_without_activation
-    if rails_testmon?(options)
-      partial = []
-      command = ENV["MINITEST_TESTMON_RAILS_COMMAND"]
-      partial << "test:* task" unless %w[test t].include?(command)
-      partial << "test paths" if Array(options[:test_files]).any? && !rails_all_suite_testmon?(options)
-      partial << "--include/--name" if options[:include]
-      partial << "--exclude" if options[:exclude]
-      partial << "DEFAULT_TEST" if ENV.key?("DEFAULT_TEST")
-      partial << "DEFAULT_TEST_EXCLUDE" if ENV.key?("DEFAULT_TEST_EXCLUDE")
-      message ||= "--testmon requires a complete Rails test suite (bin/rails test or bin/rails test:all); remove #{partial.join(", ")}" if partial.any?
-    end
     return unless message
 
     if defined?(Testmon) && Testmon.respond_to?(:take_early_observations)

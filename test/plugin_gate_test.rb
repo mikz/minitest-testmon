@@ -60,13 +60,12 @@ class PluginGateTest < TestmonTestCase
     end
   end
 
-  def test_usage_gate_still_rejects_other_test_paths
+  def test_usage_gate_accepts_focused_test_paths
     with_rails_command("test") do
       [["test/models"], [ALL_SUITE_GLOB, "test/models_test.rb"], ["test/system"]].each do |test_files|
         options = gate_options(test_files: test_files)
-        error = assert_raises(SystemExit) { Minitest.reject_testmon_usage!(options) }
-        assert_equal 2, error.status, test_files.inspect
-        assert_equal 2, options.dig(:minitest_testmon_exit_state, :status), test_files.inspect
+        assert_nil Minitest.reject_testmon_usage!(options), test_files.inspect
+        assert_nil options.dig(:minitest_testmon_exit_state, :status), test_files.inspect
       end
     end
   end

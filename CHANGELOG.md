@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Support environment-enabled focused Rails suites, names, paths, and line
+  ranges, including `db:test:prepare test:system`. Preserve omitted snapshots
+  and previously learned shared inputs during focused runs.
+
+- Attribute Playwright page and browser-context route handlers and event
+  listeners during isolated system tests. Keep callback removal semantics and
+  reject callbacks still running when their test boundary closes.
+
 - Save validated passing tests in durable checkpoints during serial and Rails
   process-worker runs. Preserve accepted progress after failures or interruption;
   pause further learning when source files change.

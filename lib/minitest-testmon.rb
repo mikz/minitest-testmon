@@ -20,7 +20,7 @@ if defined?(Rails::Railtie)
 
             test_command = defined?(Rails::Command::TestCommand)
             rake_test_prepare = RailsBootstrap.rake_test_prepare?
-            application_root = if test_command && rake_test_prepare
+            application_root = if test_command
               Rails::Command.application_root
             end
             RailsBootstrap.call(
@@ -35,6 +35,12 @@ if defined?(Rails::Railtie)
             if ENV[RailsBootstrap::COMMAND_ENV]
               require "minitest/testmon/request_attribution"
               app.middleware.unshift(Minitest::Testmon::RequestAttribution)
+              if Gem.loaded_specs.key?("playwright-ruby-client")
+                require "playwright"
+                require "minitest/testmon/playwright_callback_attribution"
+                Playwright::Page.prepend(Minitest::Testmon::PlaywrightCallbackAttribution)
+                Playwright::BrowserContext.prepend(Minitest::Testmon::PlaywrightCallbackAttribution)
+              end
               if Gem.loaded_specs.key?("puma")
                 require "puma"
                 require "puma/configuration"

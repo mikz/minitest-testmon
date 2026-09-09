@@ -70,7 +70,7 @@ class CoreObserverTest < TestmonTestCase
   def test_constant_read_maps_back_to_the_declaring_ruby_file
     with_project do |project|
       declaration = write_file(File.join(project, "declared.rb"), "TESTMON_DECLARED_VALUE = 7\n")
-      reader = write_file(File.join(project, "reader.rb"), "TESTMON_DECLARED_VALUE\n")
+      reader = write_file(File.join(project, "reader.rb"), "raise 'unexpected constant value' unless TESTMON_DECLARED_VALUE == 7\n")
       load declaration
       session = RecordingSession.new
       tracker = Struct.new(:boundary_active?).new(false)

@@ -233,6 +233,7 @@ module Minitest
         transaction do
           verify_lease!
           verify_revision!(evidence.base_revision)
+          accepted_ids = checkpoint_progress(evidence.run_id).fetch("accepted_ids")
           if !(evidence.complete && evidence.source_stable && evidence.valid_ledger?)
             reason = if evidence.publication_reason
               evidence.publication_reason
@@ -246,10 +247,10 @@ module Minitest
             reject_evidence(evidence, reason)
           elsif evidence.failed?
             reject_evidence(evidence, "test_failure")
-          elsif !evidence.publishable_snapshots?
+          elsif !evidence.publishable_snapshots?(accepted_ids: accepted_ids)
             reject_evidence(evidence, "provider_incomplete")
           else
-            remaining = evidence.passed_ids - checkpoint_progress(evidence.run_id).fetch("accepted_ids")
+            remaining = evidence.passed_ids - accepted_ids
             next_revision = remaining.empty? ? revision : (revision || 0) + 1
             remaining.each do |test_id|
               replace_snapshot(evidence.snapshots.fetch(test_id))

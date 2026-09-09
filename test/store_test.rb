@@ -303,6 +303,45 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_publication_needs_new_snapshots_only_for_tests_not_already_checkpointed
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, nil)
+      store.acquire_lease!(run_id: "partial")
+      store.start_execution(run_id: "partial", selection: selection)
+      first = snapshot(ids.first, input("one", "v1"), "partial")
+      store.checkpoint(run_id: "partial", base_revision: nil, snapshots: [first])
+      report = Report.build(discovered: ids, selected: ids, executed: ids)
+      pending = snapshot(ids.last, input("two", "v2"), "partial")
+      final = evidence("partial", selection, report, snapshots: {ids.last => pending},
+        outcomes: ids.to_h { |id| [id, :passed] }).with(base_revision: store.revision)
+
+      assert store.publish(final).publication.fetch(:published)
+      assert_equal first.inputs, store.snapshots_for(ids).fetch(ids.first).inputs
+      assert_equal pending.inputs, store.snapshots_for(ids).fetch(ids.last).inputs
+      assert_empty store.retries_for(ids)
+    end
+  end
+
+  def test_a_revoked_checkpoint_does_not_satisfy_missing_final_snapshot_evidence
+    with_store do |store|
+      ids = ["OneTest#test_one"]
+      selection = selection_for(ids, ids, nil)
+      store.acquire_lease!(run_id: "partial")
+      store.start_execution(run_id: "partial", selection: selection)
+      store.checkpoint(run_id: "partial", base_revision: nil,
+        snapshots: [snapshot(ids.first, input("one", "v1"), "partial")])
+      store.invalidate_checkpoint("partial", ids.first)
+      report = Report.build(discovered: ids, selected: ids, executed: ids)
+      final = evidence("partial", selection, report, snapshots: {}, outcomes: {ids.first => :passed})
+        .with(base_revision: store.revision)
+
+      refute store.publish(final).publication.fetch(:published)
+      assert_empty store.snapshots_for(ids)
+      assert_equal ids, store.retries_for(ids).keys
+    end
+  end
+
   def test_supported_schema_migrations_preserve_snapshots_and_retry_state
     %w[6 7 8].each do |version|
       with_project do |project|

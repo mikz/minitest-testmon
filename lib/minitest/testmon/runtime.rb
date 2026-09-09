@@ -230,7 +230,24 @@ module Minitest
       end
 
       def evidence(report, outcomes, publication_reason: nil)
-        snapshots = @learning_stopped ? {} : build_snapshots(outcomes)
+        accepted_valid = true
+        snapshots = if @learning_stopped
+          {}
+        else
+          accepted = checkpoint_progress.fetch("accepted_ids").to_h { |id| [id, true] }
+          builder = (@snapshot_builder ||= SnapshotBuilder.new)
+          outcomes.each do |test_id, outcome|
+            next unless outcome == :passed && accepted.key?(test_id)
+            definition = @snapshot.test_definition_input(test_id)
+            if definition
+              builder.validate!(current_inputs: @session.current_inputs,
+                claimed_input_ids: @session.claimed_input_ids(test_id), test_definition_input: definition)
+            else
+              accepted_valid = false
+            end
+          end
+          build_snapshots(outcomes.reject { |id, _outcome| accepted.key?(id) })
+        end
         source_stable = @snapshot.source_stable?
         RunEvidence.new(
           run_id: @run_id,
@@ -239,7 +256,7 @@ module Minitest
           selection: @selection,
           outcomes: outcomes,
           snapshots: snapshots,
-          complete: report.complete? && !@learning_stopped,
+          complete: report.complete? && !@learning_stopped && accepted_valid,
           source_stable: source_stable,
           publication_reason: (@learning_stopped && ((@learning_stopped == "source_drift") ? "source_drift" : "provider_incomplete")) || publication_reason
         )

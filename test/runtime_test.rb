@@ -94,4 +94,60 @@ class RuntimeTest < TestmonTestCase
       runtime&.instance_variable_get(:@store)&.close
     end
   end
+
+  def test_final_evidence_validates_late_inputs_for_accepted_tests_without_rebuilding
+    with_project do |project|
+      id = "Accepted#test"
+      definition = Minitest::Testmon::Input.new(key: "test", provider: "test", facet: "content",
+        fingerprint: Minitest::Testmon::Fingerprint.known("v1"))
+      session = Struct.new(:current_inputs, :claims) do
+        def claimed_input_ids(_test_id) = claims
+      end.new([definition].freeze, [])
+      provider_snapshot = Struct.new(:definition) do
+        def test_definition_input(_test_id) = definition
+        def source_stable? = true
+      end.new(definition)
+      builder = Class.new(Minitest::Testmon::SnapshotBuilder) do
+        attr_reader :builds
+        def call(**arguments)
+          @builds = @builds.to_i + 1
+          super
+        end
+      end.new
+      store = Minitest::Testmon::Store.new(File.join(project, "state.sqlite3"))
+      selection = Minitest::Testmon::Selection.new(discovered: [id], selected: [id], reasons_by_test: {id => ["no_trace"]}, base_revision: nil)
+      runtime = Minitest::Testmon::Runtime.allocate
+      {store: store, session: session, snapshot: provider_snapshot, snapshot_builder: builder,
+       run_id: "accepted", selection: selection}.each { |key, value| runtime.instance_variable_set(:"@#{key}", value) }
+      store.acquire_lease!(run_id: "accepted")
+      store.start_execution(run_id: "accepted", selection: selection)
+      snapshots = runtime.build_snapshots(id => :passed)
+      revision = store.checkpoint(run_id: "accepted", base_revision: nil, snapshots: snapshots.values)
+      runtime.instance_variable_set(:@checkpoint_revision, revision)
+      report = Struct.new(:complete?).new(true)
+      evidence = runtime.evidence(report, {id => :passed})
+      assert evidence.complete
+      assert_empty evidence.snapshots
+      assert_equal 1, builder.builds
+
+      late = definition.with(key: "late", scope: :suite, fingerprint: nil)
+      session.current_inputs = [definition, late].freeze
+      error = assert_raises(ArgumentError) { runtime.evidence(report, {id => :passed}) }
+      assert_match(/cannot publish unknown inputs/, error.message)
+      session.current_inputs = [definition].freeze
+      session.claims = [late.id]
+      error = assert_raises(ArgumentError) { runtime.evidence(report, {id => :passed}) }
+      assert_match(/claimed inputs are absent/, error.message)
+      session.claims = []
+      session.current_inputs = [definition, definition].freeze
+      assert_raises(ArgumentError) { runtime.evidence(report, {id => :passed}) }
+      session.current_inputs = [definition].freeze
+      provider_snapshot.definition = nil
+      refute runtime.evidence(report, {id => :passed}).complete
+      assert_equal 1, builder.builds
+      assert_equal [id], store.snapshots_for([id]).keys
+    ensure
+      store&.close
+    end
+  end
 end

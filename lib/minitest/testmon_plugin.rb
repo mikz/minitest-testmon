@@ -7,17 +7,11 @@ require "minitest/testmon" if Minitest::Testmon::Environment.enabled?
 module Minitest
   register_plugin :testmon unless extensions.include?(:testmon) || extensions.include?("testmon")
 
-  module TestmonPluginOrder
-    def init_plugins(options)
-      # Rails can register reporters from test_helper after option parsing.
-      # Attach Testmon after those plugins have replaced the output reporter.
-      extensions.delete_if { |extension| extension.to_s == "testmon" }
-      register_plugin :testmon
-      super
+  module TestmonLateInitialization
+    def self.minitest_plugin_init(options)
+      Minitest.plugin_testmon_init(options)
     end
   end
-
-  singleton_class.prepend(TestmonPluginOrder)
 
   def self.plugin_testmon_options(parser, options)
     return if options[:minitest_testmon_options_registered]
@@ -36,6 +30,10 @@ module Minitest
     parser.on("--testmon-db [PATH]", "Use a specific testmon SQLite database") do |path|
       options[:testmon_database_given] = true
       path ? options[:testmon_database] = path : options[:testmon_usage_error] = "--testmon-db requires PATH"
+    end
+    parser.on_tail do
+      extensions.delete_if { |extension| extension.to_s == "testmon" }
+      register_plugin :testmon
     end
   end
 
@@ -58,6 +56,14 @@ module Minitest
     reject_testmon_usage!(options)
     return unless options[:testmon]
     return if options[:minitest_testmon_initialized]
+
+    # A late-loaded Rails helper can register minitest-reporters after us.
+    # Minitest visits appended module plugins after its existing plugins.
+    unless options[:minitest_testmon_options_registered] || options[:minitest_testmon_initialization_deferred]
+      options[:minitest_testmon_initialization_deferred] = true
+      register_plugin TestmonLateInitialization unless extensions.include?(TestmonLateInitialization)
+      return
+    end
 
     require "minitest/testmon" unless defined?(Minitest::Testmon::Runtime)
     options[:minitest_testmon_initialized] = true

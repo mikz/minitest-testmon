@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "global_trace_router"
+
 module Minitest
   module Testmon
     module CanonicalObservationValue
@@ -186,8 +188,13 @@ module Minitest
       end
 
       def start
-        @trace = TracePoint.new(@observer.event) { |trace| observe(trace) }
-        @trace.enable
+        if @session.respond_to?(:global_trace_router)
+          @trace = @session.global_trace_router.subscribe(@observer.event, @method_name) { |trace| observe(trace) }
+        else
+          filters = @method_name ? {@observer.event => {@method_name => true}} : {}
+          @trace = TracePointFactory.build([@observer.event], filters) { |trace| observe(trace) }
+          @trace.enable
+        end
         self
       rescue ArgumentError => error
         raise ObserverUnavailable, error.message

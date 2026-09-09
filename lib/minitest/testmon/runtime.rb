@@ -10,6 +10,8 @@ module Minitest
     class Runtime
       CHECKPOINT_TESTS = 25
       CHECKPOINT_SECONDS = 5
+      CHECKPOINT_MAX_SECONDS = 30
+      CHECKPOINT_COST_RATIO = 0.05
 
       attr_reader :selection
 
@@ -31,6 +33,7 @@ module Minitest
         @checkpoint_worker_ids = {}
         @worker_sequences = {}
         @last_checkpoint_at = monotonic_time
+        @checkpoint_cost = 0.0
         @last_progress_at = @last_checkpoint_at
       end
 
@@ -154,7 +157,8 @@ module Minitest
 
       def flush_checkpoints(force: false)
         return if @learning_stopped || @pending_checkpoints.empty? || !@session.checkpoint_supported?
-        return unless force || @pending_checkpoints.size >= CHECKPOINT_TESTS || monotonic_time - @last_checkpoint_at >= CHECKPOINT_SECONDS
+        started_at = monotonic_time
+        return unless force || checkpoint_due?(started_at)
         reconnect_checkpoint_store
         return stop_learning("source_drift") unless @snapshot.source_stable?
         report = @session.checkpoint_report
@@ -164,6 +168,7 @@ module Minitest
         @checkpoint_revision = @store.checkpoint(run_id: @run_id, base_revision: @checkpoint_revision, snapshots: snapshots.values)
         @pending_checkpoints.clear
         @last_checkpoint_at = monotonic_time
+        @checkpoint_cost = @last_checkpoint_at - started_at
         if @last_checkpoint_at - @last_progress_at >= CHECKPOINT_SECONDS
           warn "Testmon: #{checkpoint_progress.fetch("accepted_ids").length} tests saved."
           @last_progress_at = @last_checkpoint_at
@@ -171,6 +176,14 @@ module Minitest
       rescue => error
         stop_learning("provider_incomplete")
         warn "Testmon checkpoint unavailable: #{error.message}"
+      end
+
+      def checkpoint_due?(now)
+        elapsed = now - @last_checkpoint_at
+        # Keep the initial checkpoint prompt, then amortize measured validation
+        # and persistence cost. Final publication always forces pending work.
+        interval = [@checkpoint_cost.to_f * (1.0 / CHECKPOINT_COST_RATIO - 1), CHECKPOINT_MAX_SECONDS].min
+        elapsed >= interval && (@pending_checkpoints.size >= CHECKPOINT_TESTS || elapsed >= CHECKPOINT_SECONDS)
       end
 
       def checkpoint_progress

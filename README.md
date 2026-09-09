@@ -12,6 +12,12 @@ box, including Rails' native process-parallel test runner.
 
 ## Install
 
+Installation compiles a small C extension for TracePoint event filtering. You need
+a C compiler, Make, and the development headers for your Ruby installation.
+
+Native callback isolation between Ractors is tested. Full dependency discovery
+in applications that enter multi-Ractor mode is not currently supported.
+
 ```ruby
 # Gemfile
 group :test do
@@ -128,8 +134,10 @@ failure or interruption preserves those checkpoints. Failed, skipped, and
 unverified tests run again. Saved tests are skipped only when their recorded
 inputs still match.
 
-Checkpoints run at result boundaries after 25 passing tests or five seconds,
-and once more at normal completion. If files change during a run, Testmon stops
+The first checkpoint runs at a result boundary after 25 passing tests or five
+seconds. Later batches can wait longer to amortize measured checkpoint cost,
+up to 30 seconds between result-boundary checks. Normal completion always
+flushes pending results. If files change during a run, Testmon stops
 learning for that run and preserves earlier checkpoints. Pending results are
 not saved. You can keep editing without losing progress already accepted.
 

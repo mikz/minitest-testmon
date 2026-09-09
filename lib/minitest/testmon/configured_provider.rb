@@ -10,6 +10,11 @@ module Minitest
       def initialize(definition, capability_cache: {})
         @capability_cache = capability_cache
         @definition = definition
+        @facets_by_name = definition.facets.to_h { |facet| [facet.name, facet] }.freeze
+        @inventories_by_name = definition.inventories.to_h { |inventory| [inventory.name, inventory] }.freeze
+        @claims_by_event = definition.claims.group_by(&:event_kind).freeze
+        @artifacts_by_locator = {}
+        @artifacts_by_key = {}
         @artifacts_by_facet = {}
         @facet_snapshots = {}
         @snapshot_manifest = nil
@@ -71,8 +76,10 @@ module Minitest
         @resolver = context.resolver
         inventory_manifests = {}
         inventories = definition.inventories.to_h do |inventory|
-          files = inventory_files(inventory)
-          inventory_manifests[inventory.name] = inventory_manifest(inventory, files, context)
+          paths = inventory_paths(inventory)
+          resolved = {}
+          files = inventory_files(inventory, paths, resolved)
+          inventory_manifests[inventory.name] = inventory_manifest(inventory, files, context, paths, resolved)
           [inventory.name, files]
         rescue PathError, SystemCallError
           context.incomplete(:outside_root)
@@ -83,6 +90,8 @@ module Minitest
         definition.facets.each do |facet|
           artifacts = build_facet(facet, inventories.fetch(facet.inventory), context).sort_by(&:key).freeze
           @artifacts_by_facet[facet.name] = artifacts
+          @artifacts_by_locator[facet.name] = artifacts.group_by { |artifact| [artifact.root, artifact.relative_path] }.transform_values(&:freeze).freeze
+          @artifacts_by_key[facet.name] = artifacts.to_h { |artifact| [artifact.key, artifact] }.freeze
           @facet_snapshots[facet.name] = FacetSnapshot.new(
             name: facet.name,
             digest: facet.digest,
@@ -91,6 +100,8 @@ module Minitest
             artifact_keys: artifacts.map(&:key).sort.freeze
           ).freeze
         end
+        @artifacts_by_locator.freeze
+        @artifacts_by_key.freeze
         @artifacts_by_facet.freeze
         @facet_snapshots.freeze
         @snapshot_manifest = {
@@ -105,8 +116,10 @@ module Minitest
       def validation_manifest(context)
         @resolver = context.resolver
         definition.inventories.map do |inventory|
-          files = inventory_files(inventory)
-          [inventory.name, inventory_manifest(inventory, files, context),
+          paths = inventory_paths(inventory)
+          resolved = {}
+          files = inventory_files(inventory, paths, resolved)
+          [inventory.name, inventory_manifest(inventory, files, context, paths, resolved),
             files.map { |locator| [locator.key, ContentFingerprint.call(locator.absolute_path).to_h] }]
         end
       end
@@ -114,7 +127,7 @@ module Minitest
       def claim(observation, claims)
         return true if ignore_observation(observation, claims)
 
-        matched = definition.claims.select { |claim| claim.event_kind == observation.kind }
+        matched = @claims_by_event.fetch(observation.kind, [])
         claimed = false
         matched.each { |claim| claimed = apply_claim(claim, observation, claims) || claimed }
         claimed
@@ -136,21 +149,85 @@ module Minitest
 
       private
 
-      def inventory_files(inventory)
-        root = @resolver.root(inventory.root)
-        base = File.expand_path(inventory.base, root)
+      def inventory_paths(inventory)
+        base = File.expand_path(inventory.base, @resolver.root(inventory.root))
         @resolver.resolve(base)
+        pruned_directories = prunable_inventory_directories(base, inventory.exclude_patterns)
+        paths = inventory.include_patterns.flat_map do |pattern|
+          inventory_include_paths(base, pattern, pruned_directories)
+        end.uniq
+        expanded_paths = paths.map { |path| File.expand_path(path) }
         excluded = inventory.exclude_patterns.flat_map do |pattern|
+          # Do not enumerate unrelated excluded trees (notably node_modules
+          # and vendor) for inventories whose matches cannot be below them.
+          # Relevant patterns still use glob, preserving symlink semantics.
+          prefix = exclusion_directory_prefix(base, pattern)
+          if prefix && pruned_directories.include?(pattern.delete_suffix("/**/*")) &&
+              expanded_paths.none? { |path| path.start_with?(prefix) }
+            directory = prefix.delete_suffix(File::SEPARATOR)
+            # With DOTMATCH, directory/**/* contains directory/., which
+            # expands to the directory itself in the exclusion index.
+            next File.directory?(directory) ? [directory] : []
+          end
+          next [] if prefix && expanded_paths.none? { |path|
+            path.start_with?(prefix) || path == prefix.delete_suffix(File::SEPARATOR)
+          }
+
           Dir.glob(File.join(base, pattern), File::FNM_DOTMATCH)
         end.to_h { |path| [File.expand_path(path), true] }
+        paths.reject { |path| excluded.key?(File.expand_path(path)) }
+      end
 
-        inventory.include_patterns.flat_map do |pattern|
-          Dir.glob(File.join(base, pattern), File::FNM_DOTMATCH)
-        end.uniq.filter_map do |path|
+      def prunable_inventory_directories(base, patterns)
+        return [] if base.match?(/[\\*?\[\]{}]/)
+
+        patterns.filter_map do |pattern|
+          next unless pattern.end_with?("/**/*")
+          name = pattern.delete_suffix("/**/*")
+          next if name.empty? || name.include?("..") || name.match?(/[\\\/*?\[\]{}]/)
+          name
+        end
+      end
+
+      def inventory_include_paths(base, pattern, pruned_directories)
+        unless %w[**/*.rb **/*].include?(pattern) && !pruned_directories.empty? && File.directory?(base)
+          return Dir.glob(File.join(base, pattern), File::FNM_DOTMATCH)
+        end
+
+        suffix = pattern.delete_prefix("**/")
+        paths = Dir.glob(File.join(base, suffix), File::FNM_DOTMATCH)
+        Dir.children(base).each do |name|
+          next if pruned_directories.include?(name)
+          directory = File.join(base, name)
+          # An explicit glob prefix follows directory symlinks; recursive **
+          # does not. Keep those entries, but never turn them into prefixes.
+          next if File.symlink?(directory) || !File.directory?(directory)
+          Dir.glob(pattern, File::FNM_DOTMATCH, base: directory).each do |relative|
+            next if relative == "." || relative == ".."
+            paths << File.join(directory, relative)
+          end
+        end
+        # Recursive glob orders each directory's entries before descending;
+        # a flat string sort would put .hidden.rb before .hidden/nested.rb.
+        paths.sort_by { |path| path.split(File::SEPARATOR) }
+      end
+
+      def exclusion_directory_prefix(base, pattern)
+        return if pattern.include?("\\") || pattern.include?("..")
+
+        literal = pattern.split(/[*?\[\]{}]/, 2).first.to_s
+        boundary = literal.rindex(File::SEPARATOR)
+        return unless boundary
+
+        directory = File.expand_path(File.join(base, literal[0..boundary]))
+        directory.end_with?(File::SEPARATOR) ? directory : "#{directory}#{File::SEPARATOR}"
+      end
+
+      def inventory_files(inventory, paths, resolved)
+        paths.filter_map do |path|
           expanded = File.expand_path(path)
-          next if excluded.key?(expanded)
           next unless File.file?(expanded)
-          locator = @resolver.resolve(expanded, allow_missing: false)
+          locator = resolved[path] = @resolver.resolve(expanded, allow_missing: false)
           next unless locator.root == inventory.root
           next if ruby_source_inventory?(inventory.name) && !inventory_matches_locator?(inventory.name, locator)
           locator
@@ -159,37 +236,32 @@ module Minitest
         end.sort_by { |locator| [locator.root.to_s, locator.relative_path] }.freeze
       end
 
-      def inventory_manifest(inventory, locators, context)
+      def inventory_manifest(inventory, locators, context, paths, resolved)
         root_path = @resolver.root(inventory.root)
         base = File.expand_path(inventory.base, root_path)
-        lexical_paths = inventory.include_patterns.flat_map do |pattern|
-          Dir.glob(File.join(base, pattern), File::FNM_DOTMATCH)
-        end.uniq
-        excluded = inventory.exclude_patterns.flat_map do |pattern|
-          Dir.glob(File.join(base, pattern), File::FNM_DOTMATCH)
-        end.map { |path| File.expand_path(path) }.to_h { |path| [path, true] }
         eligible_locator_keys = locators.map(&:key).to_h { |key| [key, true] }
-        entries = lexical_paths.reject { |path| excluded.key?(File.expand_path(path)) }
+        entries = paths
           .reject { |path| File.directory?(path) }
           .reject do |path|
             next false unless ruby_source_inventory?(inventory.name)
 
-            locator = @resolver.resolve(path, allow_missing: false)
+            locator = resolved[path] || @resolver.resolve(path, allow_missing: false)
             !eligible_locator_keys.key?(locator.key)
           rescue PathError
             true
           end
           .map do |path|
+          locator = resolved[path] || @resolver.resolve(path, allow_missing: false)
           stat = File.lstat(path)
           regular = File.file?(path)
           context.incomplete(:non_regular) unless regular
           {
-            lexical_path: Pathname(File.expand_path(path)).relative_path_from(Pathname(root_path)).to_s,
+            lexical_path: relative_inventory_path(path, root_path),
             file_type: stat.ftype,
             regular: regular,
             symlink: stat.symlink? ? File.readlink(path) : nil,
-            realpath: File.realpath(path),
-            locator: @resolver.resolve(path, allow_missing: false).key
+            realpath: locator.absolute_path,
+            locator: locator.key
           }
         rescue SystemCallError, PathError => error
           context.incomplete(:non_regular)
@@ -202,6 +274,15 @@ module Minitest
           files: entries.sort_by { |item| CanonicalJSON.generate(item) },
           locators: locators.map(&:key).sort
         }
+      end
+
+      def relative_inventory_path(path, root)
+        expanded = File.expand_path(path)
+        prefix = root.end_with?(File::SEPARATOR) ? root : "#{root}#{File::SEPARATOR}"
+        return expanded.delete_prefix(prefix) if expanded.start_with?(prefix)
+        return "." if expanded == root
+
+        Pathname(expanded).relative_path_from(Pathname(root)).to_s
       end
 
       def build_facet(facet, locators, context)
@@ -354,15 +435,15 @@ module Minitest
         snapshot = @facet_snapshots.fetch(claim.facet)
         result = claim.using.call(observation, snapshot)
         selected_keys = result.nil? ? [] : Array(result).uniq
-        unless selected_keys.all? { |key| key.is_a?(String) && snapshot.artifact_keys.include?(key) }
+        artifacts = @artifacts_by_key.fetch(claim.facet)
+        unless selected_keys.all? { |key| key.is_a?(String) && artifacts.key?(key) }
           claims.unresolved(observation, :claim_path_missing)
           claims.incomplete(:claim_path_missing)
           return :invalid
         end
         return [] if selected_keys.empty?
 
-        artifacts = @artifacts_by_facet.fetch(claim.facet)
-        selected_keys.filter_map { |key| artifacts.find { |item| item.key == key } }
+        selected_keys.map { |key| artifacts.fetch(key) }
       end
 
       def keys_from_path(claim, observation, claims)
@@ -380,7 +461,7 @@ module Minitest
         end
         locator = raw_path && @resolver.resolve(raw_path.to_s)
 
-        facet = definition.facets.find { |item| item.name == claim.facet }
+        facet = @facets_by_name.fetch(claim.facet)
         candidates = @artifacts_by_facet.fetch(claim.facet)
         if facet.digest == :content && facet.granularity == :file && locator &&
             observation.exists_at_observation && !File.exist?(locator.absolute_path)
@@ -391,7 +472,7 @@ module Minitest
         selected = if facet.granularity == :set
           candidates
         elsif locator
-          matching_file_artifacts(candidates, locator)
+          matching_file_artifacts(claim.facet, locator)
         else
           []
         end
@@ -403,7 +484,7 @@ module Minitest
       end
 
       def inventory_matches_locator?(inventory_name, locator)
-        inventory = definition.inventories.find { |item| item.name == inventory_name }
+        inventory = @inventories_by_name[inventory_name]
         return false unless inventory && locator.root == inventory.root
         root = @resolver.root(inventory.root)
         base = @resolver.resolve(File.expand_path(inventory.base, root)).absolute_path
@@ -423,10 +504,8 @@ module Minitest
         end
       end
 
-      def matching_file_artifacts(candidates, locator)
-        candidates.select do |item|
-          item.root == locator.root && item.relative_path == locator.relative_path
-        end
+      def matching_file_artifacts(facet, locator)
+        @artifacts_by_locator.fetch(facet).fetch([locator.root, locator.relative_path]) { [] }
       end
     end
   end

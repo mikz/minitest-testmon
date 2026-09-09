@@ -3,6 +3,31 @@
 require_relative "test_helper"
 
 class RuntimeTest < TestmonTestCase
+  def test_checkpoint_cadence_preserves_initial_progress_and_amortizes_expensive_batches
+    runtime = Minitest::Testmon::Runtime.allocate
+    runtime.instance_variable_set(:@last_checkpoint_at, 0.0)
+    runtime.instance_variable_set(:@pending_checkpoints, 25.times.to_h { |id| [id, :passed] })
+    runtime.instance_variable_set(:@checkpoint_cost, 0.0)
+    assert runtime.checkpoint_due?(0.1), "first batch must remain available promptly"
+
+    runtime.instance_variable_set(:@checkpoint_cost, 0.5)
+    refute runtime.checkpoint_due?(5.0), "another batch must not spend 10% of elapsed time checkpointing"
+    assert runtime.checkpoint_due?(9.5)
+
+    runtime.instance_variable_set(:@checkpoint_cost, 10.0)
+    refute runtime.checkpoint_due?(29.0)
+    assert runtime.checkpoint_due?(30.0), "slow validation must not postpone progress indefinitely"
+  end
+
+  def test_sparse_results_checkpoint_at_the_time_boundary
+    runtime = Minitest::Testmon::Runtime.allocate
+    runtime.instance_variable_set(:@last_checkpoint_at, 10.0)
+    runtime.instance_variable_set(:@checkpoint_cost, 0.01)
+    runtime.instance_variable_set(:@pending_checkpoints, {"one" => :passed})
+    refute runtime.checkpoint_due?(14.9)
+    assert runtime.checkpoint_due?(15.0)
+  end
+
   def test_setup_failure_closes_the_store_so_the_next_run_can_acquire_the_lease
     with_project do |project|
       configuration = Minitest::Testmon::Configuration.new(cwd: project)

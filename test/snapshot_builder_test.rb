@@ -79,6 +79,26 @@ class SnapshotBuilderTest < TestmonTestCase
     assert_match(/cannot publish unknown inputs/, error.message)
   end
 
+  def test_reused_builder_revalidates_replaced_and_mutated_catalogs
+    builder = Minitest::Testmon::SnapshotBuilder.new
+    known = input("value", "v1")
+    arguments = {
+      test_id: "ExampleTest#test_value", claimed_input_ids: [known.id],
+      test_definition_input: nil, recorded_at: "2026-08-01T00:00:00Z", run_id: "run-1"
+    }
+    catalog = [known].freeze
+    assert_equal [known], builder.call(**arguments, current_inputs: catalog).inputs
+    assert_equal [known], builder.call(**arguments, current_inputs: catalog).inputs
+    assert_raises(ArgumentError) { builder.call(**arguments, current_inputs: [].freeze) }
+
+    mutable = [known]
+    assert_equal [known], builder.call(**arguments, current_inputs: mutable).inputs
+    mutable << known
+    assert_raises(ArgumentError) { builder.call(**arguments, current_inputs: mutable) }
+    unknown = known.with(fingerprint: Minitest::Testmon::Fingerprint.unknown(:source_race))
+    assert_raises(ArgumentError) { builder.call(**arguments, current_inputs: [unknown].freeze) }
+  end
+
   private
 
   def input(key, digest, scope: :test)

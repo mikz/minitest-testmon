@@ -12,7 +12,7 @@ module Minitest
       def start
         @collector.reset_for_fork!
         ExecutionContext.clear
-        @trace = TracePoint.new(:call, :return) { |event| observe(event) }
+        @trace = TracePointFactory.build([:call, :return], call: {run: Minitest::Test}, return: {run: Minitest::Test}) { |event| observe(event) }
         @trace.enable
         self
       end

@@ -13,6 +13,9 @@ module Minitest
       attr_reader :temporary_path, :final_path
 
       def initialize(directory:, run_id:, worker_number:, context_signature:, base_revision:)
+        @owner_pid = Process.pid
+        @mutex = Mutex.new
+        @lifecycle_mutex = Mutex.new
         @directory = File.join(directory, run_id)
         @run_id = run_id
         @worker_number = Integer(worker_number)
@@ -30,8 +33,14 @@ module Minitest
       end
 
       def record_observation(observation)
-        @completion_observations << observation.to_h
-        append(type: "observation", value: observation.to_h)
+        value = observation.to_h
+        encoded = CanonicalJSON.generate(value)
+        line = '{"type":"observation","value":' + encoded + "}\n"
+        synchronize do
+          ensure_open!
+          @io.write(line)
+          @completion_observations << encoded
+        end
       end
 
       def record_executed(test_id)
@@ -41,24 +50,38 @@ module Minitest
       # Independent, durable frames survive a later worker crash. SQLite remains
       # parent-owned. Rename happens before the result is delivered to the parent.
       def seal_test(test_id, outcome, diagnostics: [])
-        @sequence += 1
-        frame = {
-          run_id: @run_id, worker: @worker_number, pid: Process.pid,
-          context_signature: @context_signature, base_revision: @base_revision,
-          sequence: @sequence, test_id: test_id, outcome: outcome,
-          diagnostics: diagnostics, observations: @completion_observations
-        }
-        name = "test-#{Digest::SHA256.hexdigest(test_id)}-#{@worker_number}-#{Process.pid}-#{@sequence}.json"
-        target = File.join(@directory, name)
-        File.open("#{target}.tmp", File::WRONLY | File::CREAT | File::EXCL, 0o600) do |io|
-          io.write(CanonicalJSON.generate(frame))
-          io.flush
-          io.fsync
+        test_id = test_id.to_s
+        outcome = outcome.to_s
+        # Serialize provider-owned values outside either lock. Observation rows
+        # are already encoded when recorded, so draining does not invoke callbacks.
+        diagnostics_json = CanonicalJSON.generate(diagnostics)
+        synchronize_lifecycle do
+          sequence, observations = synchronize do
+            ensure_open!
+            @sequence += 1
+            pending = @completion_observations
+            @completion_observations = []
+            [@sequence, pending]
+          end
+          frame = {
+            run_id: @run_id, worker: @worker_number, pid: @owner_pid,
+            context_signature: @context_signature, base_revision: @base_revision,
+            sequence: sequence, test_id: test_id, outcome: outcome
+          }
+          payload = CanonicalJSON.generate(frame).delete_suffix("}") +
+            ',"diagnostics":' + diagnostics_json +
+            ',"observations":[' + observations.join(",") + "]}"
+          name = "test-#{Digest::SHA256.hexdigest(test_id)}-#{@worker_number}-#{@owner_pid}-#{sequence}.json"
+          target = File.join(@directory, name)
+          File.open("#{target}.tmp", File::WRONLY | File::CREAT | File::EXCL, 0o600) do |io|
+            io.write(payload)
+            io.flush
+            io.fsync
+          end
+          File.rename("#{target}.tmp", target)
+          fsync_directory
+          true
         end
-        File.rename("#{target}.tmp", target)
-        fsync_directory
-        @completion_observations = []
-        true
       end
 
       def self.completion(directory:, run_id:, test_id:, outcome:, context_signature:, base_revision:, worker_count:)
@@ -78,27 +101,35 @@ module Minitest
       end
 
       def complete!
-        return true if @complete
-        return false if @failed
-        append(type: "complete")
-        @io.flush
-        @io.fsync
-        @io.close
-        File.rename(@temporary_path, @final_path)
-        fsync_directory
-        @complete = true
-        true
-      rescue
-        restore_incomplete_path
-        @failed = true
-        false
+        synchronize_lifecycle do
+          synchronize do
+            return true if @complete
+            return false if @failed
+            @io.write("{\"type\":\"complete\"}\n")
+            @io.flush
+            @io.fsync
+            @io.close
+            File.rename(@temporary_path, @final_path)
+            fsync_directory
+            @complete = true
+            true
+          rescue
+            restore_incomplete_path
+            @failed = true
+            false
+          end
+        end
       end
 
       def abort
-        @io&.close unless @io&.closed?
-        restore_incomplete_path
-        @failed = true
-        false
+        synchronize_lifecycle do
+          synchronize do
+            @io&.close unless @io&.closed?
+            restore_incomplete_path
+            @failed = true
+            false
+          end
+        end
       end
 
       def self.merge(directory:, run_id:, worker_count:, context_signature:, base_revision:, expected_tests: nil)
@@ -249,8 +280,29 @@ module Minitest
       private
 
       def append(value)
+        line = CanonicalJSON.generate(value) + "\n"
+        synchronize do
+          ensure_open!
+          @io.write(line)
+        end
+      end
+
+      def ensure_open!
         raise PhaseError, "worker spool is closed" if @complete || @failed
-        @io.write(CanonicalJSON.generate(value), "\n")
+      end
+
+      def synchronize(&block)
+        ensure_owner!
+        @mutex.synchronize(&block)
+      end
+
+      def synchronize_lifecycle(&block)
+        ensure_owner!
+        @lifecycle_mutex.synchronize(&block)
+      end
+
+      def ensure_owner!
+        raise PhaseError, "worker spool belongs to another process" unless Process.pid == @owner_pid
       end
 
       def fsync_directory

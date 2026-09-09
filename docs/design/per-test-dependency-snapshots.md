@@ -131,7 +131,12 @@ retry flags before any execution. Passing tests can clear their flags only when
 complete dependency evidence has been accepted in a checkpoint.
 
 At result boundaries, Testmon checkpoints after 25 pending passing tests or five
-seconds since the previous checkpoint. Normal completion flushes the remainder.
+seconds since the previous checkpoint. After the first batch, it also waits at
+least 19 times the previous checkpoint's elapsed cost, capped at 30 seconds.
+This amortizes checkpoint work toward a 5% share while bounding the delay before
+the next result boundary can save progress. It is a scheduling budget, not a
+guarantee of total instrumentation overhead. Normal completion always flushes
+the remainder without waiting for the interval.
 Each checkpoint validates the original source, inventory, and configuration
 snapshot before and after building dependency snapshots. The SQLite transaction
 replaces accepted snapshots, clears their retry flags, advances the current

@@ -11,8 +11,11 @@ module Minitest
     class PathResolver
       def initialize(roots)
         @roots = roots.map do |name, path|
-          [name.to_sym, Pathname(File.realpath(path)).cleanpath.to_s]
+          [name.to_sym, File.realpath(path)]
         end.sort_by { |_name, path| -path.bytesize }
+        @root_prefixes = @roots.to_h do |_name, path|
+          [path, path.end_with?(File::SEPARATOR) ? path : "#{path}#{File::SEPARATOR}"]
+        end
       end
 
       def resolve(path, allow_missing: true)
@@ -29,7 +32,8 @@ module Minitest
         name, root = @roots.find { |_root_name, root_path| contained?(canonical, root_path) }
         raise PathError, "path is outside configured roots: #{path}" unless name
 
-        relative = Pathname(canonical).relative_path_from(Pathname(root)).cleanpath.to_s
+        prefix = @root_prefixes.fetch(root)
+        relative = (canonical == root) ? "." : canonical.delete_prefix(prefix)
         Locator.new(root: name, relative_path: relative, absolute_path: canonical)
       rescue Errno::ENOENT, Errno::EACCES, ArgumentError => error
         raise PathError, error.message
@@ -60,11 +64,11 @@ module Minitest
           ancestor = parent
         end
 
-        Pathname(File.join(File.realpath(ancestor), *suffix)).cleanpath.to_s
+        File.join(File.realpath(ancestor), *suffix)
       end
 
       def contained?(path, root)
-        path == root || path.start_with?("#{root}#{File::SEPARATOR}")
+        path == root || path.start_with?(@root_prefixes.fetch(root))
       end
     end
   end

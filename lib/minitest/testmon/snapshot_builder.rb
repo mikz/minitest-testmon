@@ -10,7 +10,7 @@ module Minitest
         unless missing.empty?
           raise ArgumentError, "claimed inputs are absent from the current catalog: #{missing.map(&:to_s).sort.join(", ")}"
         end
-        inputs = catalog.values.select { |input| input.scope == :suite }
+        inputs = @suite_inputs.dup
         inputs.concat(claimed.map { |id| catalog.fetch(id) })
         inputs << test_definition_input if test_definition_input
         inputs = inputs.to_h { |input| [input.id, input] }.values
@@ -23,12 +23,22 @@ module Minitest
       private
 
       def index_inputs(inputs)
+        return @catalog if inputs.frozen? && inputs.equal?(@indexed_inputs)
+
         values = inputs.respond_to?(:values) ? inputs.values : Array(inputs)
-        duplicates = values.group_by(&:id).select { |_id, matches| matches.length > 1 }.keys
-        unless duplicates.empty?
-          raise ArgumentError, "duplicate input identities: #{duplicates.map(&:to_s).sort.join(", ")}"
+        catalog = {}
+        duplicates = []
+        values.each do |input|
+          id = input.id
+          duplicates << id if catalog.key?(id)
+          catalog[id] = input
         end
-        values.to_h { |input| [input.id, input] }
+        unless duplicates.empty?
+          raise ArgumentError, "duplicate input identities: #{duplicates.uniq.map(&:to_s).sort.join(", ")}"
+        end
+        @suite_inputs = catalog.values.select { |input| input.scope == :suite }
+        @indexed_inputs = inputs.frozen? ? inputs : nil
+        @catalog = catalog
       end
 
       def normalize_id(value)

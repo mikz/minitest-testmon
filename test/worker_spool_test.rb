@@ -26,6 +26,110 @@ class WorkerSpoolTest < TestmonTestCase
     end
   end
 
+  def test_concurrent_split_writes_preserve_stream_and_durable_completion
+    with_project do |project|
+      spool = build_spool(project)
+      io = spool.instance_variable_get(:@io)
+      original_write = io.method(:write)
+      io.define_singleton_method(:write) do |*parts|
+        parts.sum do |part|
+          middle = part.bytesize / 2
+          original_write.call(part.byteslice(0, middle))
+          Thread.pass
+          original_write.call(part.byteslice(middle..))
+          Thread.pass
+          part.bytesize
+        end
+      end
+      ready = Queue.new
+      release = Queue.new
+      items = Array.new(320) { |index| observation(index) }
+      writers = items.each_slice(40).map do |batch|
+        Thread.new do
+          ready << true
+          release.pop
+          batch.each { |item| spool.record_observation(item) }
+        end
+      end
+      writers.length.times { ready.pop }
+      writers.length.times { release << true }
+      writers.each(&:value)
+      spool.record_executed("ExampleTest#test_many")
+      assert spool.seal_test("ExampleTest#test_many", :passed)
+      assert spool.complete!
+
+      rows = File.readlines(spool.final_path).map { |line| JSON.parse(line) }
+      assert_equal({"start" => 1, "observation" => 320, "executed" => 1, "complete" => 1}, rows.map { |row| row.fetch("type") }.tally)
+      expected = items.map(&:key).sort
+      assert_equal expected, rows.select { |row| row["type"] == "observation" }.map { |row| row.fetch("value").fetch("key") }.sort
+      completed, diagnostics, identity = Minitest::Testmon::WorkerSpool.completion(
+        directory: File.join(project, "workers"), run_id: RUN_ID,
+        test_id: "ExampleTest#test_many", outcome: :passed,
+        context_signature: "context", base_revision: 1, worker_count: 1
+      )
+      assert_equal expected, completed.map(&:key).sort
+      assert_empty diagnostics
+      assert_equal [0, Process.pid, 1], identity
+      merged = merge(project)
+      assert merged.complete
+      assert_equal expected, merged.observations.map(&:key).sort
+      assert_equal ["ExampleTest#test_many"], merged.executed
+    end
+  end
+
+  def test_recording_during_completion_publication_is_retained_for_the_next_frame
+    with_project do |project|
+      spool = build_spool(project)
+      publishing = Queue.new
+      release = Queue.new
+      original_sync = spool.method(:fsync_directory)
+      spool.define_singleton_method(:fsync_directory) do
+        unless @publication_paused
+          @publication_paused = true
+          publishing << true
+          release.pop
+        end
+        original_sync.call
+      end
+      first = observation(0).with(test_id: nil, scope: :suite)
+      second = observation(1).with(test_id: nil, scope: :suite)
+      spool.record_observation(first)
+      sealing = Thread.new { spool.seal_test("ExampleTest#test_first", :passed) }
+      publishing.pop
+      spool.record_observation(second)
+      release << true
+      assert sealing.value
+      assert spool.seal_test("ExampleTest#test_second", :passed)
+      assert spool.complete!
+
+      frames = Dir[File.join(project, "workers", RUN_ID, "test-*.json")].map { |path| JSON.parse(File.read(path)) }.sort_by { |frame| frame.fetch("sequence") }
+      assert_equal [1, 2], frames.map { |frame| frame.fetch("sequence") }
+      assert_equal [[first.key], [second.key]], frames.map { |frame| frame.fetch("observations").map { |item| item.fetch("key") } }
+      merged = merge(project)
+      assert merged.complete
+      assert_equal [first.key, second.key], merged.observations.map(&:key)
+    end
+  end
+
+  def test_inherited_spool_rejects_child_writes_before_acquiring_parent_locks
+    with_project do |project|
+      spool = build_spool(project)
+      mutex = spool.instance_variable_get(:@mutex)
+      pid = mutex.synchronize do
+        fork do
+          spool.record_observation(observation(0))
+          exit! 1
+        rescue Minitest::Testmon::PhaseError
+          exit! 0
+        end
+      end
+      _, status = Process.wait2(pid)
+      assert status.success?
+      assert spool.complete!
+      assert_empty merge(project).observations
+    end
+  end
+
   def test_round_trip_preserves_provider_owned_detail_key_shape
     with_project do |project|
       spool = build_spool(project)

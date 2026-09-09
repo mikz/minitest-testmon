@@ -3,6 +3,52 @@
 require_relative "test_helper"
 
 class ProviderRegistryTest < TestmonTestCase
+  def test_artifact_aggregation_preserves_canonical_representative_and_test_ownership
+    base = Minitest::Testmon::Artifact.new(key: 'quoted"input', provider: :example,
+      root: :project, relative_path: "žluťoučký.txt", facet: :content,
+      fingerprint: Minitest::Testmon::Fingerprint.known("digest"), members: [],
+      scope: :test, test_ids: ["Z#test"], reason: nil, identity: :content)
+    variants = [base, base.with(test_ids: ['A#test"quoted']),
+      base.with(members: ["z", "a"], test_ids: ["B#test"]),
+      base.with(fingerprint: Minitest::Testmon::Fingerprint.unknown(:source_race), reason: :source_race)]
+    session = Minitest::Testmon::ProviderSession.allocate
+    [variants, variants + [base.with(scope: :suite, test_ids: [])]].each do |items|
+      representative = items.min_by { |item| Minitest::Testmon::CanonicalJSON.generate(item.inventory_item) }
+      scope = items.any?(&:suite?) ? :suite : :test
+      ids = (scope == :suite) ? [] : items.flat_map(&:test_ids).compact.uniq.sort
+      expected = representative.with(scope: scope, test_ids: ids)
+      assert_equal [expected], session.send(:deduplicate_artifacts, items)
+      assert_equal [expected], session.send(:deduplicate_artifacts, items.reverse)
+    end
+  end
+
+  def test_pruned_exclusion_enumeration_matches_glob_with_symlinks_and_patterns
+    with_project do |project|
+      project = File.realpath(project)
+      %w[test/keep.rb test/.hidden.rb test/drop.rb vendor/private.rb targets/linked.rb].each do |name|
+        write_file(File.join(project, name), "value")
+      end
+      File.symlink("../targets", File.join(project, "test/link"))
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :files, version: 1 do
+        inventory :files, root: :project,
+          include: ["test/**/*", "test/link/*.rb"],
+          exclude: ["vendor/**/*", "test/{drop,.hidden}.rb", "test/link/**/*", "test/../vendor/**/*"]
+        facet :content, inventory: :files, digest: :content, granularity: :file
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      provider = snapshot.registrations.first.provider
+      inventory = provider.definition.inventories.first
+      included = inventory.include_patterns.flat_map { |pattern| Dir.glob(File.join(project, pattern), File::FNM_DOTMATCH) }.uniq
+      excluded = inventory.exclude_patterns.flat_map { |pattern| Dir.glob(File.join(project, pattern), File::FNM_DOTMATCH) }
+        .to_h { |path| [File.expand_path(path), true] }
+      expected = included.reject { |path| excluded.key?(File.expand_path(path)) }
+      assert_equal expected, provider.send(:inventory_paths, inventory)
+      assert_equal File.join(project, "vendor/"), provider.send(:exclusion_directory_prefix, project, "vendor/**/*")
+      assert_nil provider.send(:exclusion_directory_prefix, project, "test/../vendor/**/*")
+    end
+  end
+
   def test_snapshot_exposes_deterministic_inputs_with_context_and_exact_byte_ruby_digest
     with_project do |project|
       ruby_path = write_file(File.join(project, "lib", "account.rb"), "class Account; end\n")
@@ -59,10 +105,14 @@ class ProviderRegistryTest < TestmonTestCase
         original_claim.call(observation, claims)
       end
       session = snapshot.observe
-      session.record(Minitest::Testmon::Observation.build(kind: :template_read,
-        provider: :templates, path: path, test_id: "InvoiceTest#test_total"))
+      observation = Minitest::Testmon::Observation.build(kind: :template_read,
+        provider: :templates, path: path, test_id: "InvoiceTest#test_total")
+      3.times { session.record(observation) }
       assert session.checkpoint_report.complete?
+      session.record(observation)
+      session.import_observation(observation)
       assert session.checkpoint_report.complete?
+      assert_equal 1, session.instance_variable_get(:@observations).length
       assert session.finalize.complete?
       assert_equal 1, calls
     end

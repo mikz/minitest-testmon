@@ -29,12 +29,13 @@ Gem::Specification.new do |spec|
   ) do |files|
     files.readlines("\x0", chomp: true).select do |file|
       File.file?(File.join(__dir__, file)) &&
-        file.match?(%r{\A(?:CHANGELOG\.md|LICENSE\.txt|README\.md|docs/|exe/|lib/)})
+        file.match?(%r{\A(?:CHANGELOG\.md|LICENSE\.txt|README\.md|docs/|exe/|lib/|ext/)})
     end
   end
   spec.bindir = "exe"
   spec.executables = spec.files.grep(%r{\Aexe/}) { |file| File.basename(file) }
   spec.require_paths = ["lib"]
+  spec.extensions = ["ext/minitest_testmon_native/extconf.rb"]
 
   spec.add_dependency "minitest", ">= 6.0", "< 7"
   spec.add_dependency "sqlite3", ">= 2.0", "< 3"

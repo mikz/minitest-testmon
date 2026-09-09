@@ -27,7 +27,7 @@ jobs:
           ruby-version: "4.0.6"
           bundler-cache: true
       - run: bundle exec rake
-      - run: bundle exec rake build
+      - run: bundle exec rake package_native_smoke
 
   acceptance:
     runs-on: ubuntu-latest

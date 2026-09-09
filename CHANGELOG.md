@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Filter native and repeated Ruby trace events before entering Ruby callbacks,
+  and reuse source locations, inventory work, and dependency lookup indexes.
+  Installing the gem now builds a small MRI C extension.
+- Preserve subsequent targeted tracing when MRI rejects an unsupported target.
+  Recertify older cache evidence after this observation correction without
+  deleting stored snapshots.
+
 - Finalize focused Rails cache receipts when minitest-reporters is loaded from test_helper after option parsing.
 
 - Support environment-enabled focused Rails suites, names, paths, and line

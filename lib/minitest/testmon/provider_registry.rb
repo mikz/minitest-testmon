@@ -168,6 +168,7 @@ module Minitest
         end
         @current_inputs = inputs.sort_by { |input| input.id.to_s }.freeze
         @current_inputs_by_id = @current_inputs.to_h { |input| [input.id, input] }.freeze
+        @inputs_by_locator = @current_inputs.group_by { |input| [input.root, input.relative_path] }.freeze
         @snapshot_digest = digest_snapshot(registrations, context)
         ruby_artifacts = context.artifacts.select do |artifact|
           artifact.provider == ruby_provider_id && artifact.facet == "ruby_source"
@@ -195,9 +196,7 @@ module Minitest
         return unless location&.first
 
         locator = context.resolver.resolve(location.first)
-        candidates = current_inputs.select do |input|
-          input.root == locator.root.to_s && input.relative_path == locator.relative_path
-        end
+        candidates = @inputs_by_locator.fetch([locator.root.to_s, locator.relative_path]) { [] }
         candidates.find { |input| input.facet == "content" } ||
           candidates.find { |input| input.facet == "ruby_source" }
       rescue NameError, PathError
@@ -248,11 +247,10 @@ module Minitest
       def current_validation_manifest
         return unless registrations.all? { |item| item.provider.is_a?(ConfiguredProvider) }
         validation_context = SnapshotContext.new(configuration)
-        payload = [configuration.current_config_source_manifest,
+        [configuration.current_config_source_manifest,
           RubyVM::InstructionSequence.compile_option,
           registrations.map { |item| ConfiguredProvider.new(item.provider.definition).validation_manifest(validation_context) },
           validation_context.diagnostics]
-        Digest::SHA256.hexdigest(CanonicalJSON.generate(payload))
       end
 
       def constantize_test_class(name)
@@ -293,6 +291,7 @@ module Minitest
         @selected = selected
         @suite_input_ids = Array(suite_input_ids).uniq.freeze
         @observations = []
+        @recorded_observations = {}
         @handles = []
         @executed = []
         @runtime_diagnostics = []
@@ -301,6 +300,13 @@ module Minitest
         @phase = :created
         @claimed_input_ids_by_test = {}.freeze
         @current_inputs = snapshot.current_inputs
+      end
+
+      def global_trace_router
+        @global_trace_router ||= GlobalTraceRouter.new(events: snapshot.registrations.flat_map do |registration|
+          definition = registration.provider.definition if registration.provider.respond_to?(:definition)
+          definition ? definition.observers.select { |observer| observer.type == :tracepoint }.map(&:event) : []
+        end)
       end
 
       def start
@@ -323,7 +329,10 @@ module Minitest
         if ExecutionContext.evidence_scope == :suite && !observation.explicit_suite_evidence?
           observation = observation.as_suite_evidence
         end
+        return observation if @recorded_observations.key?(observation.key)
+
         @spool ? @spool.record_observation(observation) : @observations << observation
+        @recorded_observations[observation.key] = true
         observation
       end
 
@@ -363,6 +372,7 @@ module Minitest
       def attach_spool(spool)
         raise PhaseError, "observations are closed" unless @phase == :observing
         @observations = []
+        @recorded_observations = {}
         @executed = []
         @runtime_diagnostics = []
         @spool = spool
@@ -370,7 +380,10 @@ module Minitest
 
       def import_observation(observation)
         raise PhaseError, "observations are closed" unless @phase == :observing
+        return if @recorded_observations.key?(observation.key)
+
         @observations << observation
+        @recorded_observations[observation.key] = true
       end
 
       def import_executed(test_id)
@@ -593,8 +606,20 @@ module Minitest
       end
 
       def deduplicate_artifacts(artifacts)
+        encodings = {}
+        empty_ids = [].freeze
         artifacts.group_by { |artifact| [artifact.key, artifact.provider] }.sort_by(&:first).map do |_key, values|
-          base = values.min_by { |item| CanonicalJSON.generate(item.inventory_item) }
+          base = values.min_by do |item|
+            metadata = item.with(test_ids: empty_ids)
+            prefix, suffix = encodings[metadata] ||= begin
+              before, marker, after = CanonicalJSON.generate(metadata.inventory_item).partition('"test_ids":[]')
+              raise PhaseError, "artifact inventory omitted test_ids" if marker.empty?
+              [before + '"test_ids":', after]
+            end
+            # Most claims differ only in their test IDs. Reuse the canonical
+            # metadata encoding while preserving the exact previous ordering.
+            prefix + CanonicalJSON.generate(Array(item.test_ids).compact.sort) + suffix
+          end
           scope = (values.any? { |item| item.scope == :suite }) ? :suite : :test
           base.with(
             scope: scope,

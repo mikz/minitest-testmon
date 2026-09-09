@@ -61,6 +61,11 @@ module Minitest
 
       module_function
 
+      def store_attribution(token)
+        Thread.current.thread_variable_set(KEY, token)
+        Thread.current.instance_variable_set(:@__testmon_attribution, token)
+      end
+
       def current_test
         attribution_token&.test_id
       end
@@ -81,19 +86,19 @@ module Minitest
       def with_test(test_id)
         previous = Thread.current.thread_variable_get(KEY)
         token = AttributionToken.new(test_id)
-        Thread.current.thread_variable_set(KEY, token)
+        store_attribution(token)
         yield
       ensure
         token&.revoke
-        Thread.current.thread_variable_set(KEY, previous)
+        store_attribution(previous)
       end
 
       def with_attribution(token)
         previous = Thread.current.thread_variable_get(KEY)
-        Thread.current.thread_variable_set(KEY, token)
+        store_attribution(token)
         yield
       ensure
-        Thread.current.thread_variable_set(KEY, previous)
+        store_attribution(previous)
       end
 
       def with_borrowed_attribution(token)
@@ -106,16 +111,21 @@ module Minitest
         token.unregister(thread) if borrowed
       end
 
+      def store_evidence_scope(scope)
+        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, scope)
+        Thread.current.instance_variable_set(:@__testmon_evidence_scope, scope)
+      end
+
       def evidence_scope
         Thread.current.thread_variable_get(EVIDENCE_SCOPE_KEY) || :test
       end
 
       def with_evidence_scope(scope)
         previous = Thread.current.thread_variable_get(EVIDENCE_SCOPE_KEY)
-        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, scope)
+        store_evidence_scope(scope)
         yield
       ensure
-        Thread.current.thread_variable_set(EVIDENCE_SCOPE_KEY, previous)
+        store_evidence_scope(previous)
       end
 
       def with_boundary_attribution(evidence_scope: :test)
@@ -133,13 +143,13 @@ module Minitest
       def set(test_id, thread_sources: nil)
         clear
         token = AttributionToken.new(test_id, thread_sources:)
-        Thread.current.thread_variable_set(KEY, token)
+        store_attribution(token)
         token
       end
 
       def clear
         token = Thread.current.thread_variable_get(KEY)
-        Thread.current.thread_variable_set(KEY, nil)
+        store_attribution(nil)
         token ? token.revoke : []
       end
 

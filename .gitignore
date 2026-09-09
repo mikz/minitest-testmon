@@ -5,3 +5,10 @@
 /pkg/
 /tmp/
 /*.gem
+
+/ext/**/Makefile
+/ext/**/mkmf.log
+/ext/**/*.o
+/ext/**/*.bundle
+/ext/**/*.so
+/ext/**/*.dSYM/

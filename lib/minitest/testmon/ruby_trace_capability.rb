@@ -39,7 +39,8 @@ module Minitest
           coverage_enabled: false
         )
         targets = []
-        collect(root, [], targets)
+        types = serialized_types(root.to_a)
+        collect(root, [], targets, types)
         RubyTraceCapabilityResult.new(unhookable_targets: targets.sort_by(&:identity).freeze)
       rescue SyntaxError, RuntimeError, TypeError, SystemCallError, IOError, PathError => error
         RubyTraceCapabilityResult.new(
@@ -54,8 +55,32 @@ module Minitest
 
       private
 
-      def collect(iseq, parent_identity, output)
-        type = iseq.to_a[9]
+      # ISeq#to_a recursively serializes descendants. Serialize the tree once,
+      # but retain MRI's each_child order for stable occurrence identities.
+      def serialized_types(root)
+        types = {}
+        pending = [root]
+        until pending.empty?
+          value = pending.pop
+          next unless value.is_a?(Array)
+          if value.first == "YARVInstructionSequence/SimpleDataFormat"
+            key = [value[5], value[8]]
+            type = value[9]
+            types[key] = (types.key?(key) && types[key] != type) ? nil : type
+          end
+          value.each { |child| pending << child if child.is_a?(Array) }
+        end
+        types
+      end
+
+      def instruction_type(iseq, types)
+        # Labels and lines normally identify a type uniquely. Fall back for
+        # ambiguous metadata rather than infer a type from a label convention.
+        types[[iseq.label, iseq.first_lineno]] || iseq.to_a[9]
+      end
+
+      def collect(iseq, parent_identity, output, types)
+        type = instruction_type(iseq, types)
         component = [type.to_s, iseq.label.to_s]
         identity = parent_identity + [component]
         trace_points = iseq.trace_points.map { |line, event| [Integer(line), event.to_sym].freeze }.freeze
@@ -70,22 +95,25 @@ module Minitest
 
         counts = Hash.new(0)
         iseq.each_child do |child|
-          child_type = child.to_a[9]
+          child_type = instruction_type(child, types)
           key = [child_type, child.label]
           occurrence = counts[key]
           counts[key] += 1
-          collect(child, identity + [["occurrence", occurrence.to_s]], output)
+          collect(child, identity + [["occurrence", occurrence.to_s]], output, types)
         end
       end
 
       def target_traceable?(iseq)
         trace = TracePoint.new(*RUBY_TARGET_TRACE_EVENTS) {}
         trace.enable(target: iseq)
+        enabled = true
         true
       rescue ArgumentError, RuntimeError
         false
       ensure
-        trace&.disable
+        # MRI 4.0 can corrupt subsequent targeted tracing if disable is called
+        # after enable rejected an unsupported ISeq.
+        trace.disable if enabled
       end
     end
   end

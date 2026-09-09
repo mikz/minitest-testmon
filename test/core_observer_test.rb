@@ -3,6 +3,97 @@
 require_relative "test_helper"
 
 class CoreObserverTest < TestmonTestCase
+  def test_failed_target_does_not_disable_subsequent_valid_target_events
+    with_project do |project|
+      invalid_path = write_file(File.join(project, "invalid.rb"), "module TestmonInvalidTarget; end\n")
+      invalid = nil
+      RubyVM::InstructionSequence.compile_file(invalid_path).each_child { |child| invalid = child }
+      valid_path = write_file(File.join(project, "valid.rb"), "proc { 42 }\n")
+      block = RubyVM::InstructionSequence.compile_file(valid_path).eval
+      session = RecordingSession.new
+      observer = Minitest::Testmon::CoreObserver.new(session,
+        resolver: Minitest::Testmon::PathResolver.new(project: project), observe_files: false).start
+      observer.send(:install_target, invalid)
+      observer.send(:install_target, RubyVM::InstructionSequence.of(block))
+      Minitest::Testmon::ExecutionContext.with_test("TargetTest#test_valid") { assert_equal 42, block.call }
+      assert session.observations.any? { |item| item.kind == :provider_error && item.reason == :provider_incomplete }
+      assert session.observations.any? { |item| item.kind == :coverage_lines && item.path == File.realpath(valid_path) }
+    ensure
+      observer&.close
+    end
+  end
+
+  def test_loaded_target_reuses_policy_locator_across_executed_lines
+    with_project do |project|
+      path = write_file(File.join(project, "loop.rb"), "proc { total = 0; 20.times { total += 1 }; total }\n")
+      block = RubyVM::InstructionSequence.compile_file(path).eval
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      policy = Minitest::Testmon::RubyPathPolicy.new(configuration)
+      original = policy.method(:locator)
+      calls = 0
+      policy.define_singleton_method(:locator) do |source|
+        calls += 1 if source == path
+        original.call(source)
+      end
+      session = RecordingSession.new
+      observer = Minitest::Testmon::CoreObserver.new(session,
+        resolver: Minitest::Testmon::PathResolver.new(project: project),
+        ruby_paths: [path], ruby_path_policy: policy, observe_files: false).start
+      calls = 0
+      Minitest::Testmon::ExecutionContext.with_test("ProbeTest#test_loop") do
+        10.times { assert_equal 20, block.call }
+      end
+      assert_equal 0, calls
+      assert_equal [File.realpath(path)], session.observations.select { |item| item.kind == :coverage_lines }.map(&:path).uniq
+    ensure
+      observer&.close
+    end
+  end
+
+  def test_disabled_file_observation_exposes_shared_accessor_sources_without_native_callbacks
+    with_project do |project|
+      data = write_file(File.join(project, "data.txt"), "payload")
+      attributes = write_file(File.join(project, "attributes.rb"), <<~RUBY)
+        class TestmonFileGateAttributes
+          attr_reader :value, :read
+        end
+      RUBY
+      reader = write_file(File.join(project, "reader.rb"), <<~RUBY)
+        module TestmonFileGateReader
+          def self.call
+            File.read(#{data.dump})
+          end
+        end
+      RUBY
+      load attributes
+      load reader
+      [false, true].each do |observe_files|
+        session = RecordingSession.new
+        observer = Minitest::Testmon::CoreObserver.new(session,
+          resolver: Minitest::Testmon::PathResolver.new(project: project),
+          ruby_paths: [attributes, reader], observe_files:).start
+        object = TestmonFileGateAttributes.new
+        Minitest::Testmon::ExecutionContext.with_test("FileGateTest#value") { object.value }
+        Minitest::Testmon::ExecutionContext.with_test("FileGateTest#read") { object.read }
+        Minitest::Testmon::ExecutionContext.with_test("FileGateTest#file") do
+          assert_equal "payload", TestmonFileGateReader.call
+        end
+        generic = session.observations.select { |observation| observation.kind == :file_read }
+        assert_equal observe_files, generic.any? { |observation| observation.reason == :opaque_c_call }
+        assert_empty generic unless observe_files
+        native = session.observations.select { |observation| observation.operation == :native_method_call }
+        assert_empty native
+        assert_equal [File.realpath(attributes)], observer.native_source_locations.keys
+        assert_nil observer.instance_variable_get(:@native_trace)
+      ensure
+        observer&.close
+      end
+    ensure
+      Object.send(:remove_const, :TestmonFileGateReader) if Object.const_defined?(:TestmonFileGateReader, false)
+      Object.send(:remove_const, :TestmonFileGateAttributes) if Object.const_defined?(:TestmonFileGateAttributes, false)
+    end
+  end
+
   def test_native_event_identity_does_not_dispatch_to_the_receiver
     receiver = Object.new
     receiver.define_singleton_method(:equal?) { |*| raise "receiver identity dispatched" }
@@ -91,6 +182,46 @@ class CoreObserverTest < TestmonTestCase
       assert_equal [1], observation.details.fetch(:lines)
     ensure
       Object.send(:remove_const, :TESTMON_DECLARED_VALUE) if Object.const_defined?(:TESTMON_DECLARED_VALUE, false)
+    end
+  end
+
+  def test_constant_plans_reuse_parsing_but_resolve_redefinitions_and_aliases_live
+    with_project do |project|
+      first = write_file(File.join(project, "first.rb"), "module TESTMON_PLAN_OWNER; VALUE = 7; end\nTESTMON_PLAN_ALIAS = TESTMON_PLAN_OWNER\n")
+      second = write_file(File.join(project, "second.rb"), "TESTMON_PLAN_OWNER.const_set(:VALUE, 8)\n")
+      third = write_file(File.join(project, "third.rb"), "module TESTMON_PLAN_OTHER; VALUE = 9; end\nTESTMON_PLAN_ALIAS = TESTMON_PLAN_OTHER\n")
+      reader = write_file(File.join(project, "reader.rb"), "TESTMON_PLAN_ALIAS::VALUE\n")
+      load first
+      callable = -> {
+        load reader
+        TESTMON_PLAN_ALIAS::VALUE
+      }
+      session = RecordingSession.new
+      resolver = Minitest::Testmon::PathResolver.new(project: project)
+      observer = Minitest::Testmon::CoreObserver.new(session, resolver: resolver, observe_files: false).start
+      locator = resolver.resolve(reader)
+      lines = observer.send(:target_constant_lines, locator)
+      assert_same lines, observer.send(:target_constant_lines, locator)
+      assert lines.frozen?
+      assert_equal({1 => true}, lines)
+      Minitest::Testmon::ExecutionContext.with_test("Plans#first") { assert_equal 7, callable.call }
+      TESTMON_PLAN_OWNER.send(:remove_const, :VALUE)
+      Minitest::Testmon::ExecutionContext.with_test("Plans#missing") { assert_raises(NameError) { callable.call } }
+      load second
+      Minitest::Testmon::ExecutionContext.with_test("Plans#second") { assert_equal 8, callable.call }
+      Object.send(:remove_const, :TESTMON_PLAN_ALIAS)
+      load third
+      Minitest::Testmon::ExecutionContext.with_test("Plans#third") { assert_equal 9, callable.call }
+      reads = session.observations.select { |item| item.operation == :constant_read }
+      %w[first second third].zip([first, second, third]).each do |name, path|
+        assert_includes reads.select { |item| item.test_id == "Plans##{name}" }.map(&:path), File.realpath(path)
+      end
+      refute reads.any? { |item| item.test_id == "Plans#missing" }
+    ensure
+      observer&.close
+      %i[TESTMON_PLAN_ALIAS TESTMON_PLAN_OWNER TESTMON_PLAN_OTHER].each do |name|
+        Object.send(:remove_const, name) if Object.const_defined?(name, false)
+      end
     end
   end
 

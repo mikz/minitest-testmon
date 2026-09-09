@@ -79,24 +79,32 @@ module Minitest
       end
 
       def snapshot
-        Coverage.peek_result.each_with_object({}) do |(path, entry), output|
-          next unless project_path?(path)
-          lines = entry.is_a?(Hash) ? entry[:lines] : entry
-          output[File.expand_path(path)] = Array(lines).dup
-        end
+        # MRI returns independent counter arrays. Retain this snapshot directly;
+        # resolving every loaded source here costs two filesystem walks per test.
+        Coverage.peek_result
       end
 
       def coverage_delta(before, after)
-        after.each_with_object({}) do |(path, counters), output|
-          previous = before.fetch(path, [])
+        after.each_with_object({}) do |(path, entry), output|
+          counters = coverage_lines(entry)
+          previous = coverage_lines(before[path])
+          next if counters == previous
+
           lines = counters.each_index.filter_map do |index|
             current = counters[index]
             prior = previous[index]
             next unless current.is_a?(Integer) && current > prior.to_i
             index + 1
           end
-          output[path] = lines unless lines.empty?
+          # Resolve live paths only when execution changed their counters. In
+          # particular, retargeting a symlink must not invent historical hits.
+          next if lines.empty? || !project_path?(path)
+          output[File.expand_path(path)] = lines
         end
+      end
+
+      def coverage_lines(entry)
+        Array(entry.is_a?(Hash) ? entry[:lines] : entry)
       end
 
       def project_path?(path)

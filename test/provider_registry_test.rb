@@ -3,6 +3,52 @@
 require_relative "test_helper"
 
 class ProviderRegistryTest < TestmonTestCase
+  def test_artifact_aggregation_preserves_canonical_representative_and_test_ownership
+    base = Minitest::Testmon::Artifact.new(key: 'quoted"input', provider: :example,
+      root: :project, relative_path: "žluťoučký.txt", facet: :content,
+      fingerprint: Minitest::Testmon::Fingerprint.known("digest"), members: [],
+      scope: :test, test_ids: ["Z#test"], reason: nil, identity: :content)
+    variants = [base, base.with(test_ids: ['A#test"quoted']),
+      base.with(members: ["z", "a"], test_ids: ["B#test"]),
+      base.with(fingerprint: Minitest::Testmon::Fingerprint.unknown(:source_race), reason: :source_race)]
+    session = Minitest::Testmon::ProviderSession.allocate
+    [variants, variants + [base.with(scope: :suite, test_ids: [])]].each do |items|
+      representative = items.min_by { |item| Minitest::Testmon::CanonicalJSON.generate(item.inventory_item) }
+      scope = items.any?(&:suite?) ? :suite : :test
+      ids = (scope == :suite) ? [] : items.flat_map(&:test_ids).compact.uniq.sort
+      expected = representative.with(scope: scope, test_ids: ids)
+      assert_equal [expected], session.send(:deduplicate_artifacts, items)
+      assert_equal [expected], session.send(:deduplicate_artifacts, items.reverse)
+    end
+  end
+
+  def test_pruned_exclusion_enumeration_matches_glob_with_symlinks_and_patterns
+    with_project do |project|
+      project = File.realpath(project)
+      %w[test/keep.rb test/.hidden.rb test/drop.rb vendor/private.rb targets/linked.rb].each do |name|
+        write_file(File.join(project, name), "value")
+      end
+      File.symlink("../targets", File.join(project, "test/link"))
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :files, version: 1 do
+        inventory :files, root: :project,
+          include: ["test/**/*", "test/link/*.rb"],
+          exclude: ["vendor/**/*", "test/{drop,.hidden}.rb", "test/link/**/*", "test/../vendor/**/*"]
+        facet :content, inventory: :files, digest: :content, granularity: :file
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      provider = snapshot.registrations.first.provider
+      inventory = provider.definition.inventories.first
+      included = inventory.include_patterns.flat_map { |pattern| Dir.glob(File.join(project, pattern), File::FNM_DOTMATCH) }.uniq
+      excluded = inventory.exclude_patterns.flat_map { |pattern| Dir.glob(File.join(project, pattern), File::FNM_DOTMATCH) }
+        .to_h { |path| [File.expand_path(path), true] }
+      expected = included.reject { |path| excluded.key?(File.expand_path(path)) }
+      assert_equal expected, provider.send(:inventory_paths, inventory)
+      assert_equal File.join(project, "vendor/"), provider.send(:exclusion_directory_prefix, project, "vendor/**/*")
+      assert_nil provider.send(:exclusion_directory_prefix, project, "test/../vendor/**/*")
+    end
+  end
+
   def test_snapshot_exposes_deterministic_inputs_with_context_and_exact_byte_ruby_digest
     with_project do |project|
       ruby_path = write_file(File.join(project, "lib", "account.rb"), "class Account; end\n")
@@ -59,12 +105,65 @@ class ProviderRegistryTest < TestmonTestCase
         original_claim.call(observation, claims)
       end
       session = snapshot.observe
-      session.record(Minitest::Testmon::Observation.build(kind: :template_read,
-        provider: :templates, path: path, test_id: "InvoiceTest#test_total"))
+      observation = Minitest::Testmon::Observation.build(kind: :template_read,
+        provider: :templates, path: path, test_id: "InvoiceTest#test_total")
+      3.times { session.record(observation) }
       assert session.checkpoint_report.complete?
+      catalog = session.current_inputs
+      dependencies = session.claimed_input_ids(observation.test_id)
+      generation = session.claimed_input_generation(observation.test_id)
+      session.record(observation)
+      session.import_observation(observation)
       assert session.checkpoint_report.complete?
+      assert_same catalog, session.current_inputs
+      assert_same dependencies, session.claimed_input_ids(observation.test_id)
+      assert_equal generation, session.claimed_input_generation(observation.test_id)
+      assert_equal 0, session.catalog_generation
+      assert_equal 0, session.suite_generation
+      assert_equal 1, session.instance_variable_get(:@observations).length
       assert session.finalize.complete?
+      assert_same catalog, session.current_inputs
+      assert_same dependencies, session.claimed_input_ids(observation.test_id)
+      assert_equal generation, session.claimed_input_generation(observation.test_id)
       assert_equal 1, calls
+    end
+  end
+
+  def test_late_claims_and_suite_promotions_advance_only_affected_generations
+    with_project do |project|
+      first = write_file(File.join(project, "first.rb"), "value = 1\n")
+      second = write_file(File.join(project, "second.rb"), "value = 2\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :sources, version: 1 do
+        inventory :sources, root: :project, include: "*.rb"
+        facet :source, inventory: :sources, digest: :ruby_source, granularity: :file
+        claim :source_read, to: %i[sources source], path: :path
+      end
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      event = Minitest::Testmon::Observation.build(kind: :source_read, path: first, test_id: "Example#first")
+      other = Minitest::Testmon::Observation.build(kind: :source_read, path: second, test_id: "Example#second")
+      session.record(event)
+      session.record(other)
+      assert session.checkpoint_report.complete?
+      first_ids = session.claimed_input_ids(event.test_id)
+      second_ids = session.claimed_input_ids(other.test_id)
+      catalog = session.current_inputs
+      session.record(Minitest::Testmon::Observation.build(kind: :source_read, path: second, test_id: event.test_id))
+      assert session.checkpoint_report.complete?
+      assert_same catalog, session.current_inputs
+      assert_same second_ids, session.claimed_input_ids(other.test_id)
+      refute_same first_ids, session.claimed_input_ids(event.test_id)
+      assert_equal 2, session.claimed_input_generation(event.test_id)
+      assert_equal 1, session.claimed_input_generation(other.test_id)
+      session.record(event.as_suite_evidence)
+      assert session.checkpoint_report.complete?
+      refute_same catalog, session.current_inputs
+      assert_equal 1, session.catalog_generation
+      assert_equal 1, session.suite_generation
+      assert_equal 2, session.claimed_input_generation(event.test_id)
+      assert_equal :test, catalog.find { |input| input.relative_path == "first.rb" }.scope
+      assert_equal :suite, session.current_inputs.find { |input| input.relative_path == "first.rb" }.scope
     end
   end
 

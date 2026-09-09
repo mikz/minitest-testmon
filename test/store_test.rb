@@ -99,6 +99,55 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_publication_reuses_one_input_statement_across_snapshots_and_closes_it
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, store.revision)
+      store.acquire_lease!(run_id: "prepared")
+      store.start_execution(run_id: "prepared", selection: selection)
+      statements = track_input_statements(store)
+      snapshots = ids.to_h do |id|
+        [id, snapshot(id, input("one", "v1"), "prepared").with(inputs: [input("one", "v1"), input("two", "v2")])]
+      end
+      report = Report.build(discovered: ids, selected: ids, executed: ids)
+      store.publish(evidence("prepared", selection, report, snapshots: snapshots, outcomes: ids.to_h { |id| [id, :passed] }))
+
+      assert_equal 1, statements.length
+      assert statements.first.closed?
+      assert_equal [2, 2], store.snapshots_for(ids).values.map { |value| value.inputs.length }
+      assert_empty store.retries_for(ids)
+    end
+  end
+
+  def test_failed_checkpoint_closes_statement_and_next_transaction_prepares_again
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, store.revision)
+      store.acquire_lease!(run_id: "prepared")
+      store.start_execution(run_id: "prepared", selection: selection)
+      statements = track_input_statements(store)
+      first = snapshot(ids.first, input("one", "v1"), "prepared")
+      unknown = input("other", "v1").with(fingerprint: Minitest::Testmon::Fingerprint.unknown(:source_race))
+      second = snapshot(ids.last, unknown, "prepared")
+      assert_raises(Minitest::Testmon::PhaseError) do
+        store.checkpoint(run_id: "prepared", base_revision: nil, snapshots: [first, second])
+      end
+      assert_equal 1, statements.length
+      assert statements.first.closed?
+      assert_empty store.snapshots_for(ids)
+      assert_nil store.revision
+      assert_equal ids, store.retries_for(ids).keys
+      assert_empty store.checkpoint_progress("prepared").fetch("accepted_ids")
+
+      store.checkpoint(run_id: "prepared", base_revision: nil, snapshots: [first])
+      assert_equal 2, statements.length
+      assert statements.last.closed?
+      assert_equal [ids.first], store.snapshots_for(ids).keys
+      assert_equal [ids.last], store.retries_for(ids).keys
+      assert_equal 1, store.revision
+    end
+  end
+
   def test_incomplete_source_drift_and_invalid_ledger_reject_publication
     cases = [
       [{complete: false}, "provider_incomplete"],
@@ -254,8 +303,47 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_publication_needs_new_snapshots_only_for_tests_not_already_checkpointed
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, nil)
+      store.acquire_lease!(run_id: "partial")
+      store.start_execution(run_id: "partial", selection: selection)
+      first = snapshot(ids.first, input("one", "v1"), "partial")
+      store.checkpoint(run_id: "partial", base_revision: nil, snapshots: [first])
+      report = Report.build(discovered: ids, selected: ids, executed: ids)
+      pending = snapshot(ids.last, input("two", "v2"), "partial")
+      final = evidence("partial", selection, report, snapshots: {ids.last => pending},
+        outcomes: ids.to_h { |id| [id, :passed] }).with(base_revision: store.revision)
+
+      assert store.publish(final).publication.fetch(:published)
+      assert_equal first.inputs, store.snapshots_for(ids).fetch(ids.first).inputs
+      assert_equal pending.inputs, store.snapshots_for(ids).fetch(ids.last).inputs
+      assert_empty store.retries_for(ids)
+    end
+  end
+
+  def test_a_revoked_checkpoint_does_not_satisfy_missing_final_snapshot_evidence
+    with_store do |store|
+      ids = ["OneTest#test_one"]
+      selection = selection_for(ids, ids, nil)
+      store.acquire_lease!(run_id: "partial")
+      store.start_execution(run_id: "partial", selection: selection)
+      store.checkpoint(run_id: "partial", base_revision: nil,
+        snapshots: [snapshot(ids.first, input("one", "v1"), "partial")])
+      store.invalidate_checkpoint("partial", ids.first)
+      report = Report.build(discovered: ids, selected: ids, executed: ids)
+      final = evidence("partial", selection, report, snapshots: {}, outcomes: {ids.first => :passed})
+        .with(base_revision: store.revision)
+
+      refute store.publish(final).publication.fetch(:published)
+      assert_empty store.snapshots_for(ids)
+      assert_equal ids, store.retries_for(ids).keys
+    end
+  end
+
   def test_supported_schema_migrations_preserve_snapshots_and_retry_state
-    %w[6 7].each do |version|
+    %w[6 7 8].each do |version|
       with_project do |project|
         path = File.join(project, "state.sqlite3")
         id = "OneTest#test_one"
@@ -265,7 +353,12 @@ class StoreTest < TestmonTestCase
         store.start_execution(run_id: "unfinished", selection: selection_for([id], [id], store.revision))
         store.close
         database = SQLite3::Database.new(path)
-        database.execute("ALTER TABLE run_receipts DROP COLUMN checkpoint_json")
+        database.execute("DROP VIEW expanded_test_inputs")
+        database.execute("DROP INDEX test_snapshots_suite_set")
+        database.execute("ALTER TABLE test_snapshots DROP COLUMN suite_input_set_id")
+        database.execute("DROP TABLE suite_input_set_members")
+        database.execute("DROP TABLE suite_input_sets")
+        database.execute("ALTER TABLE run_receipts DROP COLUMN checkpoint_json") unless version == "8"
         database.execute("ALTER TABLE test_inputs DROP COLUMN scope") if version == "6"
         database.execute("UPDATE metadata SET value=? WHERE key='schema_version'", [version])
         database.close
@@ -283,7 +376,227 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_suite_inputs_are_stored_once_and_reconstructed_for_every_snapshot
+    with_store do |store|
+      shared = 113.times.map { |number| input("shared#{number}", "v1", scope: :suite) }
+      snapshots = 872.times.map do |number|
+        Minitest::Testmon::TestSnapshot.new(test_id: "SharedTest#test_#{number}",
+          inputs: [*shared, input("own#{number}", "v1")], recorded_at: "now", run_id: "shared")
+      end
+      store.acquire_lease!(run_id: "shared")
+      selection = selection_for(snapshots.map(&:test_id), snapshots.map(&:test_id), nil)
+      store.start_execution(run_id: "shared", selection: selection)
+      store.checkpoint(run_id: "shared", base_revision: nil, snapshots: snapshots)
+      database = store.instance_variable_get(:@database)
+      assert_equal 1, database.get_first_value("SELECT count(*) FROM suite_input_sets")
+      assert_equal 113, database.get_first_value("SELECT count(*) FROM suite_input_set_members")
+      assert_equal 872, database.get_first_value("SELECT count(*) FROM test_inputs")
+      actual = store.snapshots_for(snapshots.map(&:test_id))
+      assert_equal snapshots.to_h { |snapshot| [snapshot.test_id, snapshot] }, actual
+      assert_same actual.fetch(snapshots[0].test_id).inputs.find(&:suite?), actual.fetch(snapshots[1].test_id).inputs.find(&:suite?)
+      assert_equal 872, store.explain(["lib/shared0.rb"]).length
+    end
+  end
+
+  def test_shared_sets_preserve_omitted_snapshots_and_empty_replacements
+    with_store do |store|
+      seed(store, {"One#test" => input("shared", "old", scope: :suite), "Two#test" => input("shared", "old", scope: :suite)})
+      seed(store, {"One#test" => input("shared", "new", scope: :suite)})
+      values = store.snapshots_for(["One#test", "Two#test"])
+      assert_equal "new", values.fetch("One#test").inputs.first.fingerprint.digest
+      assert_equal "old", values.fetch("Two#test").inputs.first.fingerprint.digest
+      seed(store, {"One#test" => input("only_test", "v1")})
+      assert_equal ["only_test"], store.snapshots_for(["One#test"]).fetch("One#test").inputs.map(&:key)
+      assert_equal ["Two#test"], store.explain(["lib/shared.rb"]).map { |row| row.fetch(:test_id) }
+    end
+  end
+
+  def test_rolled_back_shared_set_is_reinserted_on_next_transaction
+    with_store do |store|
+      value = snapshot("One#test", input("shared", "v1", scope: :suite), "run")
+      assert_raises(RuntimeError) do
+        store.send(:transaction) do
+          store.send(:replace_snapshot, value)
+          raise "abort after set insertion"
+        end
+      end
+      assert_empty store.snapshots_for([value.test_id])
+      database = store.instance_variable_get(:@database)
+      assert_equal 0, database.get_first_value("SELECT count(*) FROM suite_input_sets")
+      store.send(:transaction) { store.send(:replace_snapshot, value) }
+      assert_equal value, store.snapshots_for([value.test_id]).fetch(value.test_id)
+      assert_nil store.instance_variable_get(:@persisted_suite_sets)
+    end
+  end
+
+  def test_schema_eight_suite_rows_migrate_lazily_with_identical_selection
+    with_project do |project|
+      path = File.join(project, "state.sqlite3")
+      store = Minitest::Testmon::Store.new(path)
+      old = input("shared", "old", scope: :suite)
+      seed(store, {"One#test" => old, "Two#test" => old})
+      store.close
+      database = SQLite3::Database.new(path)
+      database.execute("INSERT INTO test_inputs SELECT * FROM expanded_test_inputs")
+      database.execute("DROP VIEW expanded_test_inputs")
+      database.execute("DROP INDEX test_snapshots_suite_set")
+      database.execute("ALTER TABLE test_snapshots DROP COLUMN suite_input_set_id")
+      database.execute("DROP TABLE suite_input_set_members")
+      database.execute("DROP TABLE suite_input_sets")
+      database.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
+      database.close
+      store = Minitest::Testmon::Store.new(path)
+      database = store.instance_variable_get(:@database)
+      assert_equal 2, database.get_first_value("SELECT count(*) FROM test_inputs")
+      assert_equal 0, database.get_first_value("SELECT count(*) FROM suite_input_sets")
+      before = store.snapshots_for(["One#test", "Two#test"])
+      seed(store, {"One#test" => old})
+      assert_equal before, store.snapshots_for(before.keys)
+      assert_equal 1, database.get_first_value("SELECT count(*) FROM test_inputs")
+      assert_equal 1, database.get_first_value("SELECT count(*) FROM suite_input_set_members")
+      seed(store, {"One#test" => input("shared", "new", scope: :suite)})
+      values = store.snapshots_for(before.keys)
+      selection = Minitest::Testmon::Selector.new.call(discovered: before.keys,
+        current_inputs: [input("shared", "new", scope: :suite)], snapshots: values,
+        retries: {}, base_revision: store.revision, suite_input_ids: [old.id])
+      assert_equal ["Two#test"], selection.selected
+      assert_equal 2, store.explain(["lib/shared.rb"]).length
+      assert_empty Dir["#{path}.incompatible-*"]
+    ensure
+      store&.close
+    end
+  end
+
+  def test_consecutive_equal_suite_sets_encode_once_without_caching_mutable_digest_values
+    with_store do |store|
+      calls = 0
+      trace = TracePoint.new(:call) do |event|
+        calls += 1 if event.defined_class == Minitest::Testmon::PersistedInputSet && event.method_id == :initialize
+      end
+      digest = +"v1"
+      value = input("shared", digest, scope: :suite)
+      trace.enable do
+        store.send(:transaction) { store.send(:replace_snapshot, snapshot("One#test", value, "run")) }
+        store.send(:transaction) { store.send(:replace_snapshot, snapshot("Two#test", input("shared", +"v1", scope: :suite), "run")) }
+        assert_equal 1, calls
+        digest.replace("v2")
+        store.send(:transaction) { store.send(:replace_snapshot, snapshot("Three#test", value, "run")) }
+        assert_equal 2, calls
+      end
+      values = store.snapshots_for(["One#test", "Two#test", "Three#test"])
+      assert_equal %w[v1 v1 v2], values.values.map { |entry| entry.inputs.first.fingerprint.digest }.sort
+    ensure
+      trace&.disable
+    end
+  end
+
+  def test_active_legacy_lease_prevents_every_migration_step_without_quarantine
+    %w[6 7 8].each do |version|
+      with_project do |project|
+        path = File.join(project, "state.sqlite3")
+        store = Minitest::Testmon::Store.new(path)
+        seed(store, {"One#test" => input("one", "v1")})
+        store.close
+        database = SQLite3::Database.new(path)
+        database.execute("DROP VIEW expanded_test_inputs")
+        database.execute("DROP INDEX test_snapshots_suite_set")
+        database.execute("ALTER TABLE test_snapshots DROP COLUMN suite_input_set_id")
+        database.execute("DROP TABLE suite_input_set_members")
+        database.execute("DROP TABLE suite_input_sets")
+        database.execute("ALTER TABLE run_receipts DROP COLUMN checkpoint_json") unless version == "8"
+        database.execute("ALTER TABLE test_inputs DROP COLUMN scope") if version == "6"
+        database.execute("UPDATE metadata SET value=? WHERE key='schema_version'", [version])
+        database.execute("INSERT INTO leases(name, token, owner_pid, run_id, created_at) VALUES ('cache', 'live', ?, 'owner', 'now')", [Process.pid])
+        schema = database.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        assert_raises(Minitest::Testmon::LeaseUnavailable) { Minitest::Testmon::Store.new(path) }
+        assert_equal version, database.get_first_value("SELECT value FROM metadata WHERE key='schema_version'")
+        assert_equal schema, database.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        assert_equal 1, database.get_first_value("SELECT count(*) FROM test_inputs")
+        assert_equal "live", database.get_first_value("SELECT token FROM leases")
+        assert_empty Dir["#{path}.incompatible-*"]
+      ensure
+        database&.close
+      end
+    end
+  end
+
+  def test_cold_schema_is_not_visible_until_its_metadata_is_complete
+    with_project do |project|
+      visible = []
+      klass = Class.new(Minitest::Testmon::Store) do
+        define_method(:create_suite_input_schema!) do
+          reader = SQLite3::Database.new(path, readonly: true)
+          visible << reader.get_first_value("SELECT name FROM sqlite_master WHERE name='metadata'")
+          reader.close
+          super()
+        end
+      end
+      store = klass.new(File.join(project, "state.sqlite3"))
+      assert_equal [nil], visible
+      reopened = Minitest::Testmon::Store.new(store.path)
+      assert_empty Dir["#{store.path}.incompatible-*"]
+    ensure
+      reopened&.close
+      store&.close
+    end
+  end
+
+  def test_brief_external_reader_does_not_reject_lease_acquisition
+    with_store do |store|
+      script = <<~RUBY_CHILD
+        require "sqlite3"
+        database = SQLite3::Database.new(ARGV.fetch(0), readonly: true)
+        database.execute("BEGIN")
+        database.execute("SELECT * FROM metadata")
+        STDOUT.sync = true
+        puts "locked"
+        sleep 0.05
+        database.execute("COMMIT")
+        database.close
+      RUBY_CHILD
+      IO.popen([RbConfig.ruby, "-e", script, store.path], "r") do |reader|
+        assert_equal "locked\n", reader.gets
+        assert store.acquire_lease!(run_id: "reader-contention")
+      end
+      contender = Minitest::Testmon::Store.new(store.path)
+      assert_raises(Minitest::Testmon::LeaseUnavailable) { contender.acquire_lease!(run_id: "contender") }
+    ensure
+      contender&.close
+    end
+  end
+
+  def test_competing_initializer_is_revalidated_without_quarantine
+    with_project do |project|
+      klass = Class.new(Minitest::Testmon::Store) do
+        define_method(:create_schema!) do
+          # The first absence check has already happened. Model another opener
+          # finishing its atomic initialization before this opener gets the lock.
+          other = Minitest::Testmon::Store.new(path)
+          other.close
+          super()
+        end
+      end
+      store = klass.new(File.join(project, "state.sqlite3"))
+      assert_equal Minitest::Testmon::Store::SCHEMA_VERSION.to_s, store.send(:metadata, "schema_version")
+      assert_empty Dir["#{store.path}.incompatible-*"]
+    ensure
+      store&.close
+    end
+  end
+
   private
+
+  def track_input_statements(store)
+    database = store.instance_variable_get(:@database)
+    original = database.method(:prepare)
+    statements = []
+    database.define_singleton_method(:prepare) do |sql, *arguments, &block|
+      statement = original.call(sql, *arguments, &block)
+      statements << statement if sql.include?("INSERT INTO test_inputs(")
+      statement
+    end
+    statements
+  end
 
   def with_store
     with_project do |project|

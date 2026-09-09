@@ -71,13 +71,15 @@ ordinary per-test snapshots through the same comparison path.
 
 ## Durable schema
 
-The selection tables are intentionally literal:
+Each test still owns its complete historical input list. Schema 9 stores identical
+suite input lists once, using immutable content-addressed sets:
 
 ```sql
 test_snapshots(
   test_id TEXT PRIMARY KEY,
   recorded_at TEXT NOT NULL,
-  run_id TEXT NOT NULL
+  run_id TEXT NOT NULL,
+  suite_input_set_id TEXT REFERENCES suite_input_sets(id)
 )
 
 test_inputs(
@@ -88,6 +90,7 @@ test_inputs(
   root TEXT,
   relative_path TEXT,
   digest TEXT,
+  scope TEXT NOT NULL CHECK (scope IN ('test', 'suite')),
   state TEXT NOT NULL CHECK (state IN ('known', 'missing')),
   PRIMARY KEY(test_id, provider, input_key)
 )
@@ -98,6 +101,23 @@ retry_tests(
   updated_at TEXT NOT NULL
 )
 ```
+
+`suite_input_sets` stores the set ID. `suite_input_set_members` stores the same
+input columns as `test_inputs`, with a set ID instead of a test ID. The set ID
+hashes every persisted input field in canonical order, including fingerprint
+state and scope. Different historical fingerprints therefore remain separate
+sets. Store reconstructs the same public `TestSnapshot.inputs` list and expands
+shared members for explanation queries; selection and provider scopes do not
+change.
+
+Versions 6 and 7 first migrate to schema 8, then to schema 9. Existing input rows
+remain untouched until their test snapshot is replaced. New writes store only
+test-scoped inputs in `test_inputs`; the snapshot references its immutable suite
+set. Set creation and snapshot replacement use the same checkpoint transaction.
+Rollback clears transaction-local set caches. Unreferenced sets are retained;
+there is no orphan cleanup. Older binaries retain their existing behavior of
+quarantining unfamiliar schema versions, so downgrade compatibility is not
+provided.
 
 `metadata`, `leases`, and `run_receipts` hold the schema/revision, exclusive
 writer lease, and retained reports. There is no separate fingerprints table,
@@ -131,7 +151,12 @@ retry flags before any execution. Passing tests can clear their flags only when
 complete dependency evidence has been accepted in a checkpoint.
 
 At result boundaries, Testmon checkpoints after 25 pending passing tests or five
-seconds since the previous checkpoint. Normal completion flushes the remainder.
+seconds since the previous checkpoint. After the first batch, it also waits at
+least 19 times the previous checkpoint's elapsed cost, capped at 30 seconds.
+This amortizes checkpoint work toward a 5% share while bounding the delay before
+the next result boundary can save progress. It is a scheduling budget, not a
+guarantee of total instrumentation overhead. Normal completion always flushes
+the remainder without waiting for the interval.
 Each checkpoint validates the original source, inventory, and configuration
 snapshot before and after building dependency snapshots. The SQLite transaction
 replaces accepted snapshots, clears their retry flags, advances the current

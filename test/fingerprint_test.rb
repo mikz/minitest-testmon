@@ -31,6 +31,29 @@ class FingerprintTest < TestmonTestCase
     end
   end
 
+  def test_path_resolver_preserves_root_and_unicode_paths_after_symlink_retargeting
+    with_project do |project|
+      first = write_file(File.join(project, "first", "žluťoučký.rb"), "nil\n")
+      second = write_file(File.join(project, "second", "žluťoučký.rb"), "nil\n")
+      link = File.join(project, "current")
+      File.symlink(File.dirname(first), link)
+      resolver = Minitest::Testmon::PathResolver.new(project: project)
+
+      assert_equal ".", resolver.resolve(project).relative_path
+      assert_equal "first/žluťoučký.rb", resolver.resolve(File.join(link, "žluťoučký.rb")).relative_path
+      File.unlink(link)
+      File.symlink(File.dirname(second), link)
+      assert_equal "second/žluťoučký.rb", resolver.resolve(File.join(link, "žluťoučký.rb")).relative_path
+      assert_raises(Minitest::Testmon::PathError) { resolver.resolve("#{project}-outside") }
+    end
+  end
+
+  def test_path_resolver_supports_the_filesystem_root
+    resolver = Minitest::Testmon::PathResolver.new(filesystem: File::SEPARATOR)
+    assert_equal ".", resolver.resolve(File::SEPARATOR).relative_path
+    assert_equal File.realpath(__FILE__).delete_prefix(File::SEPARATOR), resolver.resolve(__FILE__).relative_path
+  end
+
   def test_path_resolver_canonicalizes_missing_paths_through_the_nearest_existing_ancestor
     with_project do |project|
       outside = Dir.mktmpdir("minitest-testmon-outside")

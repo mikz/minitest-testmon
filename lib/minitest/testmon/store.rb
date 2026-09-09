@@ -5,6 +5,7 @@ require "json"
 require "securerandom"
 require "sqlite3"
 require "time"
+require_relative "persisted_input_set"
 
 module Minitest
   module Testmon
@@ -14,7 +15,7 @@ module Minitest
     # read-side decision; this class atomically validates and publishes run
     # evidence while owning durable state, leases, and receipts.
     class Store
-      SCHEMA_VERSION = 8
+      SCHEMA_VERSION = 9
       DEFAULT_RETAINED_REPORTS = 10
       SchemaIncompatible = Class.new(StandardError)
 
@@ -232,6 +233,7 @@ module Minitest
         transaction do
           verify_lease!
           verify_revision!(evidence.base_revision)
+          accepted_ids = checkpoint_progress(evidence.run_id).fetch("accepted_ids")
           if !(evidence.complete && evidence.source_stable && evidence.valid_ledger?)
             reason = if evidence.publication_reason
               evidence.publication_reason
@@ -245,10 +247,10 @@ module Minitest
             reject_evidence(evidence, reason)
           elsif evidence.failed?
             reject_evidence(evidence, "test_failure")
-          elsif !evidence.publishable_snapshots?
+          elsif !evidence.publishable_snapshots?(accepted_ids: accepted_ids)
             reject_evidence(evidence, "provider_incomplete")
           else
-            remaining = evidence.passed_ids - checkpoint_progress(evidence.run_id).fetch("accepted_ids")
+            remaining = evidence.passed_ids - accepted_ids
             next_revision = remaining.empty? ? revision : (revision || 0) + 1
             remaining.each do |test_id|
               replace_snapshot(evidence.snapshots.fetch(test_id))
@@ -328,7 +330,7 @@ module Minitest
           SELECT test_inputs.root, test_inputs.relative_path, test_inputs.facet,
                  test_inputs.digest AS fingerprint, test_inputs.test_id,
                  test_inputs.provider, test_inputs.input_key
-          FROM test_inputs
+          FROM expanded_test_inputs AS test_inputs
           ORDER BY test_inputs.root, test_inputs.relative_path,
                    test_inputs.facet, test_inputs.test_id
         SQL
@@ -365,7 +367,9 @@ module Minitest
       def connect
         @database = SQLite3::Database.new(path)
         @database.results_as_hash = true
-        @database.busy_timeout = 0
+        # Brief physical reader locks must not reject an otherwise valid write.
+        # Logical lease ownership is checked separately and never retried.
+        @database.busy_timeout = 250
         @database.execute("PRAGMA foreign_keys = ON")
       end
 
@@ -374,11 +378,12 @@ module Minitest
           integrity = @database.get_first_value("PRAGMA integrity_check")
           raise SQLite3::CorruptException, integrity unless integrity == "ok"
           migrate_checkpoint_schema! if %w[6 7].include?(metadata("schema_version"))
+          migrate_suite_input_schema! if metadata("schema_version") == "8"
           raise SchemaIncompatible, "schema mismatch" unless metadata("schema_version") == SCHEMA_VERSION.to_s
-        elsif database_empty?
-          create_schema!
         else
-          raise SchemaIncompatible, "metadata table is missing"
+          # Another opener may finish initialization before this one gets the
+          # creation lock. Revalidate its committed schema after releasing it.
+          validate_or_rebuild! unless create_schema!
         end
       rescue SQLite3::BusyException, SQLite3::LockedException
         raise LeaseUnavailable, "cache_lease_unavailable"
@@ -399,6 +404,15 @@ module Minitest
       end
 
       def create_schema!
+        transaction do
+          next false if schema_present?
+          raise SchemaIncompatible, "metadata table is missing" unless database_empty?
+          write_schema!
+          true
+        end
+      end
+
+      def write_schema!
         @database.execute_batch(<<~SQL)
           PRAGMA foreign_keys = ON;
           CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -449,17 +463,56 @@ module Minitest
           );
           CREATE INDEX run_receipts_finished ON run_receipts(state, finished_at);
         SQL
+        create_suite_input_schema!
         set_metadata("schema_version", SCHEMA_VERSION.to_s)
       end
 
       def migrate_checkpoint_schema!
         transaction do
+          next unless %w[6 7].include?(metadata("schema_version"))
           owner = @database.get_first_value("SELECT owner_pid FROM leases WHERE name = 'cache'")
           raise LeaseUnavailable, "cache_lease_unavailable" if owner && process_alive?(Integer(owner))
           if metadata("schema_version") == "6"
             @database.execute("ALTER TABLE test_inputs ADD COLUMN scope TEXT NOT NULL DEFAULT 'suite'")
           end
           @database.execute("ALTER TABLE run_receipts ADD COLUMN checkpoint_json TEXT")
+          set_metadata("schema_version", "8")
+        end
+      end
+
+      def create_suite_input_schema!
+        @database.execute_batch(<<~SQL)
+          CREATE TABLE suite_input_sets (id TEXT PRIMARY KEY);
+          CREATE TABLE suite_input_set_members (
+            set_id TEXT NOT NULL REFERENCES suite_input_sets(id),
+            provider TEXT NOT NULL,
+            input_key TEXT NOT NULL,
+            facet TEXT NOT NULL,
+            root TEXT,
+            relative_path TEXT,
+            digest TEXT,
+            scope TEXT NOT NULL CHECK (scope = 'suite'),
+            state TEXT NOT NULL CHECK (state IN ('known', 'missing')),
+            PRIMARY KEY(set_id, provider, input_key)
+          );
+          ALTER TABLE test_snapshots ADD COLUMN suite_input_set_id TEXT REFERENCES suite_input_sets(id);
+          CREATE INDEX test_snapshots_suite_set ON test_snapshots(suite_input_set_id);
+          CREATE VIEW expanded_test_inputs AS
+            SELECT test_id, provider, input_key, facet, root, relative_path, digest, scope, state FROM test_inputs
+            UNION ALL
+            SELECT snapshots.test_id, members.provider, members.input_key, members.facet,
+                   members.root, members.relative_path, members.digest, members.scope, members.state
+            FROM test_snapshots AS snapshots JOIN suite_input_set_members AS members
+              ON members.set_id = snapshots.suite_input_set_id;
+        SQL
+      end
+
+      def migrate_suite_input_schema!
+        transaction do
+          next unless metadata("schema_version") == "8"
+          owner = @database.get_first_value("SELECT owner_pid FROM leases WHERE name = 'cache'")
+          raise LeaseUnavailable, "cache_lease_unavailable" if owner && process_alive?(Integer(owner))
+          create_suite_input_schema!
           set_metadata("schema_version", SCHEMA_VERSION.to_s)
         end
       end
@@ -484,25 +537,30 @@ module Minitest
       end
 
       def replace_snapshot(snapshot)
-        @database.execute(
-          <<~SQL,
-            INSERT INTO test_snapshots(test_id, recorded_at, run_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT(test_id) DO UPDATE SET
-              recorded_at=excluded.recorded_at,
-              run_id=excluded.run_id
-          SQL
-          [snapshot.test_id, snapshot.recorded_at, snapshot.run_id]
-        )
-        @database.execute("DELETE FROM test_inputs WHERE test_id = ?", [snapshot.test_id])
         snapshot.inputs.each do |input|
           raise PhaseError, "unknown input cannot be published: #{input.id}" unless input.known?
-          @database.execute(
-            <<~SQL,
-              INSERT INTO test_inputs(
-                test_id, provider, input_key, facet, root, relative_path, digest, scope, state
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            SQL
+        end
+        suite_inputs, test_inputs = snapshot.inputs.partition(&:suite?)
+        set_id = persist_suite_input_set(suite_inputs)
+        @database.execute(
+          <<~SQL,
+            INSERT INTO test_snapshots(test_id, recorded_at, run_id, suite_input_set_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(test_id) DO UPDATE SET
+              recorded_at=excluded.recorded_at,
+              run_id=excluded.run_id,
+              suite_input_set_id=excluded.suite_input_set_id
+          SQL
+          [snapshot.test_id, snapshot.recorded_at, snapshot.run_id, set_id]
+        )
+        @database.execute("DELETE FROM test_inputs WHERE test_id = ?", [snapshot.test_id])
+        test_inputs.each do |input|
+          @snapshot_input_insert ||= @database.prepare(<<~SQL)
+            INSERT INTO test_inputs(
+              test_id, provider, input_key, facet, root, relative_path, digest, scope, state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          SQL
+          @snapshot_input_insert.execute(
             [
               snapshot.test_id, input.provider, input.key, input.facet, input.root,
               input.relative_path, input.fingerprint.digest, input.scope.to_s,
@@ -512,31 +570,73 @@ module Minitest
         end
       end
 
+      def persist_suite_input_set(inputs)
+        return if inputs.empty?
+        unless @last_suite_inputs == inputs
+          # Input is immutable, but callers can supply a mutable digest String.
+          # Retain its value rather than allowing a later mutation to hit the memo.
+          @last_suite_inputs = inputs.map do |input|
+            digest = input.fingerprint.digest
+            (digest.nil? || digest.frozen?) ? input : input.with(fingerprint: input.fingerprint.with(digest: digest.dup.freeze))
+          end.freeze
+          @last_suite_input_set = PersistedInputSet.new(@last_suite_inputs)
+        end
+        set = @last_suite_input_set
+        @persisted_suite_sets ||= {}
+        return set.id if @persisted_suite_sets.key?(set.id)
+        unless @database.get_first_value("SELECT 1 FROM suite_input_sets WHERE id = ?", [set.id])
+          @database.execute("INSERT INTO suite_input_sets(id) VALUES (?)", [set.id])
+          @suite_input_insert ||= @database.prepare(<<~SQL)
+            INSERT INTO suite_input_set_members(
+              set_id, provider, input_key, facet, root, relative_path, digest, scope, state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          SQL
+          set.rows.each { |row| @suite_input_insert.execute([set.id, *row]) }
+        end
+        @persisted_suite_sets[set.id] = true
+        set.id
+      end
+
       def inputs_for(ids)
         placeholders = (["?"] * ids.length).join(",")
-        @database.execute(
+        pairs = @database.execute(
           <<~SQL,
             SELECT test_id, provider, input_key, facet, root, relative_path, digest, scope, state
             FROM test_inputs WHERE test_id IN (#{placeholders})
             ORDER BY test_id, provider, input_key
           SQL
           ids
-        ).map do |row|
-          fingerprint = case row.fetch("state")
-          when "known" then Fingerprint.known(row.fetch("digest"))
-          when "missing" then Fingerprint.new(state: :missing, digest: row.fetch("digest"), reason: :nonexistent)
-          else raise PhaseError, "invalid persisted fingerprint state"
+        ).map { |row| [row.fetch("test_id"), persisted_input(row)] }
+        references = @database.execute(
+          "SELECT test_id, suite_input_set_id FROM test_snapshots WHERE test_id IN (#{placeholders}) AND suite_input_set_id IS NOT NULL", ids
+        )
+        grouped = references.group_by { |row| row.fetch("suite_input_set_id") }
+        grouped.each do |set_id, snapshots|
+          inputs = @database.execute(
+            "SELECT provider, input_key, facet, root, relative_path, digest, scope, state FROM suite_input_set_members WHERE set_id = ? ORDER BY provider, input_key", [set_id]
+          ).map { |row| persisted_input(row) }
+          snapshots.each do |snapshot|
+            inputs.each { |input| pairs << [snapshot.fetch("test_id"), input] }
           end
-          [row.fetch("test_id"), Input.new(
-            key: row.fetch("input_key"),
-            provider: row.fetch("provider"),
-            facet: row.fetch("facet"),
-            root: row["root"],
-            relative_path: row["relative_path"],
-            fingerprint: fingerprint,
-            scope: row.fetch("scope").to_sym
-          )]
         end
+        pairs
+      end
+
+      def persisted_input(row)
+        fingerprint = case row.fetch("state")
+        when "known" then Fingerprint.known(row.fetch("digest"))
+        when "missing" then Fingerprint.new(state: :missing, digest: row.fetch("digest"), reason: :nonexistent)
+        else raise PhaseError, "invalid persisted fingerprint state"
+        end
+        Input.new(
+          key: row.fetch("input_key"),
+          provider: row.fetch("provider"),
+          facet: row.fetch("facet"),
+          root: row["root"],
+          relative_path: row["relative_path"],
+          fingerprint: fingerprint,
+          scope: row.fetch("scope").to_sym
+        )
       end
 
       def reject_evidence(evidence, reason)
@@ -661,6 +761,12 @@ module Minitest
           nil
         end
         raise
+      ensure
+        @snapshot_input_insert&.close
+        @snapshot_input_insert = nil
+        @suite_input_insert&.close
+        @suite_input_insert = nil
+        @persisted_suite_sets = nil
       end
 
       def prune_run_receipts

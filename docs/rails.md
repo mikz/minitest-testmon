@@ -26,7 +26,7 @@ access if it changes.
 | `rails.schema@1` | schema/structure files and migrations | suite |
 | `rails.views@1` | template content per test; view-path membership copied to every test | mixed |
 | `rails.locales@1` | locale content per consumer; load-path membership copied to every test | mixed |
-| `rails.fixtures@1` | declared fixture content per test; fixture membership copied to every test | mixed |
+| `rails.fixtures@2` | declared fixture content per test; fixture membership copied to every test | mixed |
 | `rails.assets@1` | resolved content per test; asset membership copied to every test | mixed |
 
 Boot and schema content is suite-scoped because changing it can alter the

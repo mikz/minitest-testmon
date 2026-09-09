@@ -17,6 +17,24 @@ class ExecutionContextTest < TestmonTestCase
     Context.clear
   end
 
+  def test_native_thread_state_tracks_nested_context_and_ensure_restoration
+    Context.with_test("outer") do
+      outer = Context.attribution_token
+      assert_same outer, Thread.current.instance_variable_get(:@__testmon_attribution)
+      assert_raises(RuntimeError) do
+        Context.with_test("inner") do
+          Context.with_evidence_scope(:suite) do
+            assert_equal :suite, Thread.current.instance_variable_get(:@__testmon_evidence_scope)
+            raise "restore"
+          end
+        end
+      end
+      assert_same outer, Thread.current.instance_variable_get(:@__testmon_attribution)
+      assert_nil Thread.current.instance_variable_get(:@__testmon_evidence_scope)
+    end
+    assert_nil Thread.current.instance_variable_get(:@__testmon_attribution)
+  end
+
   def test_new_start_and_fork_propagate_a_live_test_attribution
     Context.set("GreetingsSystemTest#test_index")
 

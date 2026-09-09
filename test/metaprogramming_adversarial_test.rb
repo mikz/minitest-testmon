@@ -87,7 +87,7 @@ class MetaprogrammingAdversarialTest < TestmonTestCase
     end
   end
 
-  def test_native_attr_accessor_is_attributed_to_its_declaring_source
+  def test_native_attr_accessor_declaring_source_is_a_shared_dependency
     with_project do |project|
       declaration = write_file(File.join(project, "lib/accessor_target.rb"), <<~RUBY)
         class TestmonAccessorTarget
@@ -102,11 +102,16 @@ class MetaprogrammingAdversarialTest < TestmonTestCase
         target.generated_value
       end
 
-      assert_test_dependency report, "lib/accessor_target.rb"
-      native_call = report.observations.any? do |observation|
-        observation.operation == :native_method_call && observation.path == File.realpath(declaration)
+      artifact = report.artifacts.find { |item| item.relative_path == "lib/accessor_target.rb" && item.facet == "ruby_source" }
+      refute_nil artifact
+      assert artifact.suite?
+      assert report.dependencies.any? { |dependency| dependency.test_id == "*" && dependency.artifact_key == artifact.key }
+      assert report.complete?, report.diagnostics.inspect
+      shared_source = report.observations.any? do |observation|
+        observation.operation == :native_source_shared && observation.explicit_suite_evidence? && observation.path == File.realpath(declaration)
       end
-      assert native_call
+      assert shared_source
+      refute report.observations.any? { |observation| observation.operation == :native_method_call }
     ensure
       remove_constant(:TestmonAccessorTarget)
     end
@@ -151,6 +156,11 @@ class MetaprogrammingAdversarialTest < TestmonTestCase
       boundary_tracker: Minitest::Testmon::ExecutionContext
     ).start
     session.attach_observer(observer)
+    runtime = Minitest::Testmon::Runtime.allocate
+    runtime.instance_variable_set(:@snapshot, snapshot)
+    runtime.instance_variable_set(:@session, session)
+    runtime.instance_variable_set(:@suite_input_ids, [])
+    runtime.send(:promote_native_sources, observer.native_source_locations)
 
     Minitest::Testmon::ExecutionContext.with_test(TEST_ID) { yield }
     session.executed(TEST_ID)

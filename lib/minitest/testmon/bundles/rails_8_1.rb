@@ -39,7 +39,7 @@ module Minitest
           definitions[:"rails.assets"] = AssetsDefinition.new(configuration) if defined?(Propshaft::LoadPath)
           definitions.each do |name, implementation|
             next if configuration.providers.any? { |provider| provider.name == name }
-            configuration.provider(name, implementation, version: 1)
+            configuration.provider(name, implementation, version: (name == :"rails.fixtures") ? 2 : 1)
           end
           true
         end
@@ -57,9 +57,7 @@ module Minitest
         def external_runtime_paths
           paths = view_roots
           paths.concat(Array(I18n.load_path)) if defined?(I18n)
-          if defined?(ActiveSupport::TestCase) && ActiveSupport::TestCase.respond_to?(:fixture_paths)
-            paths.concat(Array(ActiveSupport::TestCase.fixture_paths))
-          end
+          paths.concat(fixture_roots)
           paths.map(&:to_s).reject(&:empty?).uniq
         end
 
@@ -87,9 +85,44 @@ module Minitest
           File.directory?(path) ? [path] : []
         end
 
-        def fixture_roots
+        def fixture_test_cases
           return [] unless defined?(ActiveSupport::TestCase) && ActiveSupport::TestCase.respond_to?(:fixture_paths)
-          Array(ActiveSupport::TestCase.fixture_paths).map(&:to_s).reject(&:empty?).uniq
+          test_cases = [ActiveSupport::TestCase]
+          test_cases.concat(ActiveSupport::TestCase.descendants) if ActiveSupport::TestCase.respond_to?(:descendants)
+          test_cases.uniq
+        end
+
+        def fixture_roots
+          fixture_test_cases.flat_map { |test_case| Array(test_case.fixture_paths) }.map(&:to_s).reject(&:empty?).uniq.sort
+        end
+
+        def fixture_layout_digest(configuration)
+          resolver = PathResolver.new(configuration.roots)
+          logical_paths = lambda do |test_case|
+            paths = Array(test_case.fixture_paths).map do |path|
+              resolver.resolve(path.to_s).key
+            rescue PathError
+              # Unowned roots cannot contribute publishable fixture evidence.
+              "unavailable"
+            end
+            paths
+          end
+          base = defined?(ActiveSupport::TestCase) && ActiveSupport::TestCase
+          base_paths = base ? logical_paths.call(base) : []
+          layout = fixture_test_cases.filter_map do |test_case|
+            paths = logical_paths.call(test_case)
+            # Focused discovery loads fewer test classes. Rails helpers may
+            # append the inherited list again; complete repetitions preserve
+            # default precedence. Partial repeats and nondefault orders do not.
+            inherited_layout = paths == base_paths || (!base_paths.empty? &&
+              (paths.length % base_paths.length).zero? &&
+              paths.each_slice(base_paths.length).all? { |slice| slice == base_paths })
+            next if test_case != base && inherited_layout
+            # Preserve named associations for nondefault layouts, including
+            # inherited overrides. Anonymous classes never expose object IDs.
+            [test_case.name || "<anonymous>", paths]
+          end
+          Digest::SHA256.hexdigest(CanonicalJSON.generate(layout.sort_by { |item| CanonicalJSON.generate(item) }))
         end
 
         def asset_roots
@@ -439,7 +472,12 @@ module Minitest
 
         class FixturesDefinition
           def initialize(configuration)
-            @specs = Rails81.inventory_specs(configuration, Rails81.fixture_roots, prefix: :fixtures)
+            # Physical roots are a set, but each class's lookup order affects
+            # duplicate fixture labels. Include that ordered layout in identity.
+            prefix = "fixtures_#{Rails81.fixture_layout_digest(configuration)}"
+            @specs = Rails81.inventory_specs(configuration, Rails81.fixture_roots, prefix: prefix)
+              .sort_by { |spec| [spec.fetch(:root).to_s, spec.fetch(:base)] }
+              .each_with_index.map { |spec, index| spec.merge(name: :"#{prefix}_#{index}") }
           end
 
           def define(builder)
@@ -463,16 +501,26 @@ module Minitest
               :rails_declared_fixtures,
               details: ->(test) {
                 fixture_table_names = Array(test.class_value(:fixture_table_names))
-                {"fixture_table_names" => fixture_table_names} unless fixture_table_names.empty?
+                unless fixture_table_names.empty?
+                  details = {"fixture_table_names" => fixture_table_names}
+                  paths = test.class_value(:fixture_paths)
+                  details["directories"] = Array(paths).map(&:to_s) if paths
+                  details
+                end
               }
             )
             targets.each do |inventory, content, membership|
+              spec = @specs.find { |item| item.fetch(:name) == inventory }
               builder.claim :rails_declared_fixtures,
                 to: [inventory, content],
-                using: Rails81.method(:fixture_content_keys)
+                using: ->(observation, facet) {
+                  Rails81.fixture_content_keys(observation, facet, directory: spec.fetch(:path))
+                }
               builder.claim :rails_declared_fixtures,
                 to: [inventory, membership],
-                using: Rails81.method(:fixture_membership_keys)
+                using: ->(observation, facet) {
+                  Rails81.fixture_membership_keys(observation, facet, directory: spec.fetch(:path))
+                }
             end
 
             if defined?(ActiveRecord::FixtureSet)

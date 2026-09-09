@@ -10,6 +10,8 @@ module Minitest
     class Runtime
       CHECKPOINT_TESTS = 25
       CHECKPOINT_SECONDS = 5
+      CHECKPOINT_MAX_SECONDS = 30
+      CHECKPOINT_COST_RATIO = 0.05
 
       attr_reader :selection
 
@@ -31,6 +33,7 @@ module Minitest
         @checkpoint_worker_ids = {}
         @worker_sequences = {}
         @last_checkpoint_at = monotonic_time
+        @checkpoint_cost = 0.0
         @last_progress_at = @last_checkpoint_at
       end
 
@@ -57,7 +60,7 @@ module Minitest
           allowed_roots: core_roots,
           allowed_paths: core_paths
         )
-        @session.attach_observer(CoreObserver.new(
+        core_observer = CoreObserver.new(
           @session,
           resolver: @snapshot.context.resolver,
           allowed_roots: core_roots,
@@ -66,7 +69,9 @@ module Minitest
           test_only: true,
           observe_files: @force_full || @snapshot.claims_event?(:file_open, :file_read),
           boundary_tracker: @collector
-        ).start)
+        ).start
+        @session.attach_observer(core_observer)
+        promote_native_sources(core_observer.native_source_locations)
         @process_parallel = rails_process_parallel?
         reject_unsupported_parallelism!(discovered)
 
@@ -154,7 +159,8 @@ module Minitest
 
       def flush_checkpoints(force: false)
         return if @learning_stopped || @pending_checkpoints.empty? || !@session.checkpoint_supported?
-        return unless force || @pending_checkpoints.size >= CHECKPOINT_TESTS || monotonic_time - @last_checkpoint_at >= CHECKPOINT_SECONDS
+        started_at = monotonic_time
+        return unless force || checkpoint_due?(started_at)
         reconnect_checkpoint_store
         return stop_learning("source_drift") unless @snapshot.source_stable?
         report = @session.checkpoint_report
@@ -164,6 +170,7 @@ module Minitest
         @checkpoint_revision = @store.checkpoint(run_id: @run_id, base_revision: @checkpoint_revision, snapshots: snapshots.values)
         @pending_checkpoints.clear
         @last_checkpoint_at = monotonic_time
+        @checkpoint_cost = @last_checkpoint_at - started_at
         if @last_checkpoint_at - @last_progress_at >= CHECKPOINT_SECONDS
           warn "Testmon: #{checkpoint_progress.fetch("accepted_ids").length} tests saved."
           @last_progress_at = @last_checkpoint_at
@@ -171,6 +178,14 @@ module Minitest
       rescue => error
         stop_learning("provider_incomplete")
         warn "Testmon checkpoint unavailable: #{error.message}"
+      end
+
+      def checkpoint_due?(now)
+        elapsed = now - @last_checkpoint_at
+        # Keep the initial checkpoint prompt, then amortize measured validation
+        # and persistence cost. Final publication always forces pending work.
+        interval = [@checkpoint_cost.to_f * (1.0 / CHECKPOINT_COST_RATIO - 1), CHECKPOINT_MAX_SECONDS].min
+        elapsed >= interval && (@pending_checkpoints.size >= CHECKPOINT_TESTS || elapsed >= CHECKPOINT_SECONDS)
       end
 
       def checkpoint_progress
@@ -200,7 +215,7 @@ module Minitest
 
       def build_snapshots(outcomes)
         recorded_at = Time.now.utc.iso8601(6)
-        builder = SnapshotBuilder.new
+        builder = (@snapshot_builder ||= SnapshotBuilder.new)
         outcomes.filter_map do |test_id, outcome|
           next unless outcome == :passed
           definition = @snapshot.test_definition_input(test_id)
@@ -215,7 +230,24 @@ module Minitest
       end
 
       def evidence(report, outcomes, publication_reason: nil)
-        snapshots = @learning_stopped ? {} : build_snapshots(outcomes)
+        accepted_valid = true
+        snapshots = if @learning_stopped
+          {}
+        else
+          accepted = checkpoint_progress.fetch("accepted_ids").to_h { |id| [id, true] }
+          builder = (@snapshot_builder ||= SnapshotBuilder.new)
+          outcomes.each do |test_id, outcome|
+            next unless outcome == :passed && accepted.key?(test_id)
+            definition = @snapshot.test_definition_input(test_id)
+            if definition
+              builder.validate!(current_inputs: @session.current_inputs,
+                claimed_input_ids: @session.claimed_input_ids(test_id), test_definition_input: definition)
+            else
+              accepted_valid = false
+            end
+          end
+          build_snapshots(outcomes.reject { |id, _outcome| accepted.key?(id) })
+        end
         source_stable = @snapshot.source_stable?
         RunEvidence.new(
           run_id: @run_id,
@@ -224,7 +256,7 @@ module Minitest
           selection: @selection,
           outcomes: outcomes,
           snapshots: snapshots,
-          complete: report.complete? && !@learning_stopped,
+          complete: report.complete? && !@learning_stopped && accepted_valid,
           source_stable: source_stable,
           publication_reason: (@learning_stopped && ((@learning_stopped == "source_drift") ? "source_drift" : "provider_incomplete")) || publication_reason
         )
@@ -329,6 +361,7 @@ module Minitest
       end
 
       def current_inputs
+        return @native_source_inputs if @native_source_inputs
         return @snapshot.current_inputs if @snapshot.respond_to?(:current_inputs)
 
         @snapshot.context.artifacts.map do |artifact|
@@ -342,6 +375,42 @@ module Minitest
             members: artifact.members,
             scope: artifact.scope
           )
+        end
+      end
+
+      def promote_native_sources(locations)
+        ids = {}
+        matched = {}
+        ruby_provider = @snapshot.registrations.find { |registration| registration.name.to_sym == :ruby }
+        provider = ruby_provider&.provider
+        definition = provider.definition if provider.respond_to?(:definition)
+        provider_id = definition.id.to_s if definition.respond_to?(:id)
+        @snapshot.context.artifacts.each do |artifact|
+          # Ruby-source artifacts use :whole_file identity. Content artifacts
+          # (including test definitions for the same path) use :content and are
+          # not claimed by the explicit coverage_lines evidence recorded below.
+          next unless artifact.provider.to_s == provider_id && artifact.identity == :whole_file && artifact.root && artifact.relative_path
+          path = File.expand_path(artifact.relative_path, @snapshot.context.resolver.root(artifact.root))
+          next unless locations.key?(path)
+          ids[artifact.to_input.id] = true
+          matched[path] = true
+        end
+        unless matched.length == locations.length
+          @session.startup_incomplete(:provider_incomplete)
+        end
+        @native_source_inputs = current_inputs.map do |input|
+          ids.key?(input.id) ? input.with(scope: :suite) : input
+        end.freeze
+        # Missing shared sources must select previously cached tests before any
+        # execution, including sources newly added to the startup census.
+        @suite_input_ids = (@suite_input_ids + ids.keys).uniq.sort_by(&:to_s).freeze
+        locations.each do |path, line|
+          @session.record(Observation.build(
+            kind: :coverage_lines,
+            path: path,
+            operation: :native_source_shared,
+            details: {lines: [line]}
+          ).as_suite_evidence)
         end
       end
 

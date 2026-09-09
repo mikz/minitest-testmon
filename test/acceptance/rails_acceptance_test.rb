@@ -29,7 +29,7 @@ class RailsAcceptanceTest < Minitest::Test
         provider: "rails.locales@1",
         path_suffix: "config/locales/en.yml"
       assert_provider_claim baseline,
-        provider: "rails.fixtures@1",
+        provider: "rails.fixtures@2",
         path_suffix: "test/fixtures/widgets.yml"
 
       marker = project.path.join("tmp/warm-test-marker")
@@ -272,7 +272,7 @@ class RailsAcceptanceTest < Minitest::Test
       assert result.success?, rails_failure("declared fixture change", result)
       assert_only_selected report, "WidgetTest#test_declared_fixture"
       assert_provider_claim report,
-        provider: "rails.fixtures@1",
+        provider: "rails.fixtures@2",
         path_suffix: "test/fixtures/widgets.yml"
     end
 
@@ -286,7 +286,7 @@ class RailsAcceptanceTest < Minitest::Test
       assert result.success?, rails_failure("manual FixtureSet change", result)
       assert_only_selected report, "ManualFixtureTest#test_manual_fixture_load"
       assert_provider_claim report,
-        provider: "rails.fixtures@1",
+        provider: "rails.fixtures@2",
         path_suffix: "test/manual_fixtures/manual_widgets.yml"
     end
   end

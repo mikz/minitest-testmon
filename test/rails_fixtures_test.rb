@@ -60,9 +60,120 @@ class RailsFixturesTest < TestmonTestCase
     end
   end
 
+  def test_class_fixture_paths_are_inventoried_and_do_not_claim_other_roots
+    configure = lambda do |project|
+      directory = File.join(project, "native/fixtures")
+      write_file(File.join(directory, "widgets.yml"), "native")
+      test_case = Class.new(ActiveSupport::TestCase) do
+        define_singleton_method(:fixture_paths) { [Pathname(directory)] }
+        define_singleton_method(:fixture_table_names) { [:widgets] }
+        attr_reader :name
+        define_method(:initialize) { |name| @name = name }
+      end
+      self.class.const_set(:LocalFixtureCase, test_case)
+    end
+    with_fixture_snapshot(configure:) do |snapshot, fixture_set, project, _project_fixtures, _shared_fixtures|
+      test_id = "RailsFixturesTest::LocalFixtureCase#test_widgets"
+      session = snapshot.observe
+      session.test_started(self.class::LocalFixtureCase.new("test_widgets"))
+      Minitest::Testmon::ExecutionContext.with_test(test_id) do
+        fixture_set.create_fixtures([File.join(project, "native/fixtures")], [:widgets])
+      end
+      report = session.finalize
+
+      assert report.complete?, report.diagnostics.inspect
+      assert_equal ["project:native/fixtures", "project:native/fixtures/widgets.yml"], claimed_paths(report, test_id)
+      refute_includes ActiveSupport::TestCase.fixture_paths, File.join(project, "native/fixtures")
+    end
+  ensure
+    self.class.send(:remove_const, :LocalFixtureCase) if self.class.const_defined?(:LocalFixtureCase, false)
+  end
+
+  def test_root_lookup_order_changes_signature_and_claims_every_selected_root
+    with_fixture_snapshot do |snapshot, fixture_set, project, first, second|
+      ActiveSupport::TestCase.define_singleton_method(:fixture_paths) { [second, first] }
+      reordered = fixture_snapshot(project, File.dirname(second))
+      refute_equal snapshot.signature, reordered.signature
+      session = reordered.observe
+      Minitest::Testmon::ExecutionContext.with_test(TEST_ID) do
+        fixture_set.create_fixtures([second, first], [:widgets])
+      end
+      report = session.finalize
+      assert report.complete?, report.diagnostics.inspect
+      assert_equal ["project:fixtures", "project:fixtures/widgets.yml", "shared:fixtures", "shared:fixtures/widgets.yml"], claimed_paths(report, TEST_ID)
+    end
+  end
+
+  def test_subclass_lookup_order_changes_signature_without_changing_root_union
+    with_fixture_snapshot do |_snapshot, _fixture_set, project, first, second|
+      klass = Class.new(ActiveSupport::TestCase)
+      self.class.const_set(:OrderedFixtureCase, klass)
+      klass.define_singleton_method(:fixture_paths) { [first, second] }
+      baseline = fixture_snapshot(project, File.dirname(second))
+      roots = Minitest::Testmon::Bundles::Rails81.fixture_roots
+      klass.define_singleton_method(:fixture_paths) { [second, first] }
+      reordered = fixture_snapshot(project, File.dirname(second))
+      assert_equal roots, Minitest::Testmon::Bundles::Rails81.fixture_roots
+      refute_equal baseline.signature, reordered.signature
+    end
+  ensure
+    self.class.send(:remove_const, :OrderedFixtureCase) if self.class.const_defined?(:OrderedFixtureCase, false)
+  end
+
+  def test_inherited_fixture_layout_does_not_change_with_discovered_test_classes
+    with_fixture_snapshot do |snapshot, _fixture_set, project, _first, second|
+      named = Class.new(ActiveSupport::TestCase)
+      self.class.const_set(:InheritedFixtureCase, named)
+      anonymous = Class.new(ActiveSupport::TestCase)
+      defaults = ActiveSupport::TestCase.fixture_paths
+      named.define_singleton_method(:fixture_paths) { defaults * 2 }
+      expanded = fixture_snapshot(project, File.dirname(second))
+      assert_equal snapshot.signature, expanded.signature
+      assert_nil anonymous.name
+    end
+  ensure
+    self.class.send(:remove_const, :InheritedFixtureCase) if self.class.const_defined?(:InheritedFixtureCase, false)
+  end
+
+  def test_partial_fixture_path_repetition_preserves_changed_precedence
+    with_fixture_snapshot do |snapshot, _fixture_set, project, first, second|
+      ActiveSupport::TestCase.define_singleton_method(:fixture_paths) { [first, second, first] }
+      changed = fixture_snapshot(project, File.dirname(second))
+      refute_equal snapshot.signature, changed.signature
+    end
+  end
+
+  def test_layout_identity_is_stable_across_checkouts_and_anonymous_classes
+    signatures = 2.times.map do
+      with_fixture_snapshot do |_snapshot, _fixture_set, project, _first, second|
+        Class.new(ActiveSupport::TestCase)
+        fixture_snapshot(project, File.dirname(second)).signature
+      end
+    end
+    assert_equal signatures.first, signatures.last
+  end
+
+  def test_class_value_converts_only_pathnames_and_preserves_canonical_values
+    klass = Class.new do
+      def name = "test_paths"
+      def self.paths = [Pathname("relative/fixtures"), "plain", :symbol, 1, nil]
+      def self.path = Pathname("missing/fixtures")
+      def self.unsupported = Object.new
+    end
+    wrapper = Minitest::Testmon::TestStartObservation.new(klass.new)
+    values = wrapper.class_value(:paths)
+    assert_equal ["relative/fixtures", "plain", "symbol", 1, nil], values
+    assert_predicate values, :frozen?
+    values.first(3).each { |value| assert_predicate value, :frozen? }
+    scalar = wrapper.class_value(:path)
+    assert_equal "missing/fixtures", scalar
+    assert_predicate scalar, :frozen?
+    assert_raises(TypeError) { wrapper.class_value(:unsupported) }
+  end
+
   private
 
-  def with_fixture_snapshot
+  def with_fixture_snapshot(configure: nil)
     raise "ActiveRecord unexpectedly loaded in the gem unit suite" if Object.const_defined?(:ActiveRecord, false)
     raise "ActiveSupport unexpectedly loaded in the gem unit suite" if Object.const_defined?(:ActiveSupport, false)
 
@@ -73,11 +184,8 @@ class RailsFixturesTest < TestmonTestCase
         write_file(File.join(project_fixtures, "widgets.yml"), "project")
         write_file(File.join(shared_fixtures, "widgets.yml"), "shared")
         fixture_set = install_fixture_framework([project_fixtures, shared_fixtures])
-        configuration = Minitest::Testmon::Configuration.new(cwd: project)
-        configuration.root(:shared, shared)
-        implementation = Minitest::Testmon::Bundles::Rails81::FixturesDefinition.new(configuration)
-        configuration.provider :"rails.fixtures", implementation, version: 1
-        snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+        configure&.call(project)
+        snapshot = fixture_snapshot(project, shared)
 
         yield snapshot, fixture_set, project, project_fixtures, shared_fixtures
       end
@@ -85,6 +193,14 @@ class RailsFixturesTest < TestmonTestCase
       Object.send(:remove_const, :ActiveRecord) if Object.const_defined?(:ActiveRecord, false)
       Object.send(:remove_const, :ActiveSupport) if Object.const_defined?(:ActiveSupport, false)
     end
+  end
+
+  def fixture_snapshot(project, shared)
+    configuration = Minitest::Testmon::Configuration.new(cwd: project)
+    configuration.root(:shared, shared)
+    implementation = Minitest::Testmon::Bundles::Rails81::FixturesDefinition.new(configuration)
+    configuration.provider :"rails.fixtures", implementation, version: 2
+    Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
   end
 
   def install_fixture_framework(roots)
@@ -98,6 +214,7 @@ class RailsFixturesTest < TestmonTestCase
     Object.const_set(:ActiveRecord, active_record)
     test_case = Class.new
     test_case.define_singleton_method(:fixture_paths) { roots }
+    test_case.define_singleton_method(:descendants) { subclasses }
     active_support = Module.new
     active_support.const_set(:TestCase, test_case)
     Object.const_set(:ActiveSupport, active_support)

@@ -48,8 +48,10 @@ module Minitest
         selected == executed && outcomes.keys == executed
       end
 
-      def publishable_snapshots?
-        snapshots.keys.sort == passed_ids.sort
+      def publishable_snapshots?(accepted_ids: [])
+        passed = passed_ids
+        supplied = snapshots.keys
+        (supplied - passed).empty? && (passed - supplied - accepted_ids).empty?
       end
     end
   end

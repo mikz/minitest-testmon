@@ -174,6 +174,7 @@ class ProviderRegistryTest < TestmonTestCase
           def test_generated
             assert true
           end
+          define_method("test_Mailer#action_has_a_named_preview") { assert true }
         end
       RUBY
       load source
@@ -185,6 +186,7 @@ class ProviderRegistryTest < TestmonTestCase
 
       assert_equal "test/generated_definition_test.rb", definition.relative_path
       assert_equal Digest::SHA256.file(source).hexdigest, definition.fingerprint.digest
+      assert_equal definition, snapshot.test_definition_input("GeneratedDefinitionTest#test_Mailer#action_has_a_named_preview")
 
       session = snapshot.observe
       session.test_started(GeneratedDefinitionTest.new("test_generated"))

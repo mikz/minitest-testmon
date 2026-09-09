@@ -33,6 +33,7 @@ if ENV.fetch("MINITEST_TESTMON") == "1"
 end
 
 Dir["lib/**/*.rb"].sort.each { |path| require File.expand_path(path) }
+CONFIG_TOTAL = Dir["config/*.json"].sort.sum { |path| JSON.parse(File.read(path)).fetch("weight") } if ENV["DETERMINISTIC_CONFIG_TOTAL"]
 Dir["test/*_test.rb"].sort.each { |path| require File.expand_path(path) }
 Minitest.after_run do
   times = Process.times

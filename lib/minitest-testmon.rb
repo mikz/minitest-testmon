@@ -20,7 +20,7 @@ if defined?(Rails::Railtie)
 
             test_command = defined?(Rails::Command::TestCommand)
             rake_test_prepare = RailsBootstrap.rake_test_prepare?
-            application_root = if test_command && rake_test_prepare
+            application_root = if test_command
               Rails::Command.application_root
             end
             RailsBootstrap.call(

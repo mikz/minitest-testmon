@@ -60,20 +60,20 @@ MINITEST_TESTMON=1 bin/rails test
 MINITEST_TESTMON=1 bin/rails test:all
 ```
 
-`1`, `true`, `yes`, and `on` are accepted case-insensitively. `--testmon`
-remains available as an equivalent command-line form.
+`1`, `true`, `yes`, and `on` are accepted case-insensitively. Native Rails
+commands also support focused suites, files, line ranges, names, and exclusions:
 
-The direct Rails interface accepts the two complete suite shapes: the default
-suite (`bin/rails test`) and the full suite including system tests
-(`bin/rails test:all`). Test paths, other `test:*` tasks, `--include`/`--name`,
-`--exclude`, `DEFAULT_TEST`, and `DEFAULT_TEST_EXCLUDE`, plus explicit Rails
-`--environment`/`-e` options, are unsupported. When Rails leaves enough information for the Railtie or Minitest
-plugin to inspect, Testmon rejects the invocation with exit 2 before its
-runtime, SQLite lease, run receipt, or any test body. Early boot observations
-are discarded. Rails may consume, reinterpret, or reject some argument
-placements earlier, so their native diagnostics and ordering are not a Testmon
-API. Testmon performs its own selection after Rails has discovered the complete
-suite.
+```sh
+MINITEST_TESTMON=1 bin/rails test test/models/widget_test.rb
+MINITEST_TESTMON=1 bin/rails test --name test_widget
+MINITEST_TESTMON=1 bin/rails db:test:prepare test:system
+```
+
+Testmon selects affected tests within the requested subset and preserves cached
+snapshots for omitted tests. A focused receipt does not certify the whole suite.
+Use environment activation for focused runs: Rails can parse command-line flags
+before loading the gem. `--testmon` remains available for commands that load the
+application before option parsing. See [Rails integration](docs/rails.md).
 
 Set an optional state path alongside environment activation:
 
@@ -138,8 +138,8 @@ Other command shapes are rejected before tests start. If Testmon cannot safely
 learn from a successful run, it keeps the last known-good cache and prints a
 warning.
 
-Testmon also rejects `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` because they can
-silently turn a complete suite into a partial run.
+The wrapper rejects `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE`; use the native
+Rails interface with Testmon enabled for focused runs.
 
 The console reports cached, selected, checkpointed, retained, and retry counts.
 Report schema 3 adds `checkpoints` with `count`, `accepted_ids`, and `stop_reason`.

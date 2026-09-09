@@ -2,7 +2,7 @@
 
 Use Rails' generated `bin/rails` unchanged and declare `minitest-testmon`
 normally in the Gemfile's test group. Bundler autorequires a lightweight
-entrypoint. For an activated complete Rails test command, its Railtie confirms
+entrypoint. For an activated Rails test command, its Railtie confirms
 the `test:prepare` lifecycle and starts Testmon from
 `before_configuration`, using `Rails::Command.application_root` as the
 canonical root. No application initializer is required.
@@ -58,23 +58,26 @@ MINITEST_TESTMON=1 bin/rails test:all
 ```
 
 `1`, `true`, `yes`, and `on` enable Testmon case-insensitively. The
-`--testmon` flag remains an equivalent command-line form.
+`--testmon` flag remains available when Rails loads the application before
+parsing Minitest options. Use environment activation for focused paths and names.
 
-This direct interface is deliberately complete-suite only. Two suite shapes
-qualify: the default suite (`bin/rails test`, which excludes `test/system`)
-and the full suite (`bin/rails test:all`). Rails runs `test:all` as the same
-single Minitest execution whose only difference is the `test/**/*_test.rb`
-file list; Testmon recognizes exactly that canonical shape. Test paths, other
-`test:*` tasks, `--include`/`--name`, `--exclude`, `DEFAULT_TEST`, and
-`DEFAULT_TEST_EXCLUDE`, plus explicit Rails environment options, are
-unsupported. When the relevant state remains visible after Rails parsing,
-Testmon exits 2 before a test body, runtime store, or evidence write and
-discards any early observations. A `test:*` task can still pass through Rails'
-own `test:prepare` and application boot before the Minitest plugin can reject
-it; `test:prepare` itself can fail natively before the application exists.
-Similarly, Rails may consume or reject path, name, and environment argument
-placements before Testmon sees them. Those native diagnostics and their
-ordering are outside the Testmon contract.
+Native Rails commands support full suites, `test:system`, other `test:*`
+suites, paths, line ranges, names, and exclusions with Testmon enabled:
+
+```sh
+MINITEST_TESTMON=1 bin/rails test test/models/widget_test.rb
+MINITEST_TESTMON=1 bin/rails test test/models/widget_test.rb:12
+MINITEST_TESTMON=1 bin/rails test --name test_widget
+MINITEST_TESTMON=1 bin/rails db:test:prepare test:system
+```
+
+Focused files must load the application's test helper. Rails skips its prepare
+step for paths and names; Testmon activates when that helper loads Rails.
+Selection intersects the native filters with affected tests. A focused receipt
+covers only the discovered subset; it does not certify omitted tests. Cached
+snapshots outside that subset stay untouched, and focused runs retain previously
+learned shared inputs. Explicit Rails environment flags remain unsupported;
+use the normal test environment.
 
 Set an optional state path in the environment:
 
@@ -121,9 +124,9 @@ cache. Other command shapes are rejected before tests start. If Testmon cannot
 safely learn from a successful run, it keeps the last known-good cache and
 prints a warning.
 
-Testmon rejects `DEFAULT_TEST` and `DEFAULT_TEST_EXCLUDE` because they can
-silently narrow the suite. Remove those filters, or run Rails without Testmon
-when you intentionally need a partial suite.
+The wrapper requires unfiltered `test` or `test:all` commands. Use the native
+Rails interface above for focused runs, including `DEFAULT_TEST` and
+`DEFAULT_TEST_EXCLUDE`, while keeping Testmon enabled.
 
 To disable the complete automatic bundle:
 

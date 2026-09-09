@@ -37,7 +37,8 @@ module Minitest
         return false unless option_request || environment_request
 
         test_command = !!test_command
-        test_preparation = test_command && rake_test_prepare
+        test_preparation = test_command && (rake_test_prepare ||
+          (defined?(Rails::TestUnit::Runner) && Rails::TestUnit::Runner.load_test_files))
         unless test_preparation
           reject_usage!("#{FULL_SUITE_MESSAGE}; use bin/rails test --testmon") if option_request
           return false

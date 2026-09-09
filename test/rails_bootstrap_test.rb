@@ -571,7 +571,7 @@ class RailsBootstrapTest < TestmonTestCase
     end
   end
 
-  def test_environment_activated_rails_run_rejects_default_test_filters_in_the_child
+  def test_environment_activated_rails_run_accepts_default_test_filters_in_the_child
     %w[DEFAULT_TEST DEFAULT_TEST_EXCLUDE].each do |filter|
       with_project do |project|
         marker = File.join(project, "test-body-ran")
@@ -597,11 +597,9 @@ class RailsBootstrapTest < TestmonTestCase
         RUBY
         _stdout, stderr, status = invoke_bootstrap(project, script)
 
-        assert_equal 2, status.exitstatus, filter
-        assert_match(/remove #{filter}/, stderr)
-        refute File.exist?(marker)
-        refute File.exist?(File.join(project, ".minitest-testmon.sqlite3"))
-        refute File.exist?(File.join(project, "tmp/minitest-testmon/discovery.json"))
+        assert_equal 0, status.exitstatus, "#{filter}: #{stderr}"
+        assert File.exist?(marker)
+        assert File.exist?(File.join(project, ".minitest-testmon.sqlite3"))
       end
     end
   end

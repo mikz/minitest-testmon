@@ -166,6 +166,17 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
       assert_equal 0, warm.exitstatus, cli_failure("shared Puma configuration warm run", warm)
       assert_cli_oracle { MinitestTestmonAcceptance::RailsCliOracle.assert_warm!(cold_report, warm_report, selected: []) }
 
+      replace_cli_fixture(project, "test/models/widget_test.rb", "widgets(:one).name", "widgets(:one).name.to_s")
+      focused = cli.plain(
+        env: runtime.env.merge("MINITEST_TESTMON" => "1", "MINITEST_TESTMON_DB" => cli.state_path.to_s),
+        arguments: ["test/models/widget_test.rb"]
+      )
+      assert focused.success?, cli_failure("focused shared-helper retention", focused)
+      focused_report = cli.report
+      assert_equal ["WidgetTest#test_declared_fixture"], focused_report.dig("tests", "executed")
+      assert focused_report.dig("publication", "published")
+      assert focused_report.dig("inventory", "suite_scoped", "items").any? { |item| item.fetch("path").end_with?("lib/puma_boot_input.rb") }
+
       replace_cli_fixture(project, "test/unrelated_test.rb", "2 + 2", "1 + 3")
       partial, partial_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
       assert_equal 0, partial.exitstatus, cli_failure("unrelated partial rerun", partial)
@@ -240,20 +251,6 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
       assert_equal 0, changed.exitstatus, cli_failure("test:all after view edit", changed)
       assert_equal [DASHBOARD_TEST], changed_report.dig("tests", "selected")
       assert_equal true, changed_report.dig("publication", "published")
-    end
-  end
-
-  def test_partial_test_tasks_remain_rejected
-    with_rails_cli_project do |project, runtime, cli|
-      marker = project.path.join("tmp/partial-task-marker")
-      result = cli.flagged(
-        env: runtime.env.merge("RAILS_ACCEPTANCE_TEST_MARKER" => marker.to_s),
-        command: "test:models"
-      )
-
-      assert_equal 2, result.exitstatus, cli_failure("test:models rejection", result)
-      assert_match(/remove test paths/, result.stderr)
-      refute marker.exist?, "rejected test:models executed a test body"
     end
   end
 

@@ -81,7 +81,7 @@ module Minitest
             base_revision: @store.revision
           )
         end
-        @session.retain_suite_input_ids!((@selection.selected == discovered) ? [] : @suite_input_ids)
+        @session.retain_suite_input_ids!((@selection.selected == discovered && !focused_run?(options)) ? [] : @suite_input_ids)
         @store.start_execution(run_id: @run_id, selection: @selection)
         @checkpoint_revision = @store.revision
         @selected_tests = @selection.selected
@@ -290,9 +290,21 @@ module Minitest
         end.flatten.uniq.sort_by(&:to_s).freeze
       end
 
+      def focused_run?(options)
+        files = Array(options[:test_files]).map(&:to_s).uniq.sort
+        options[:include] || options[:exclude] ||
+          (files.any? && files != @configuration.complete_suite_globs) ||
+          ENV.key?("DEFAULT_TEST") || ENV.key?("DEFAULT_TEST_EXCLUDE")
+      end
+
       def discovered_tests(options)
         Minitest::Runnable.runnables.flat_map do |klass|
-          klass.filter_runnable_methods(options).map { |method| "#{klass}##{method}" }
+          filters = if defined?(Rails::TestUnit::Runner)
+            options.merge(include: Rails::TestUnit::Runner.compose_filter(klass, options[:include]))
+          else
+            options
+          end
+          klass.filter_runnable_methods(filters).map { |method| "#{klass}##{method}" }
         end.uniq.sort
       end
 
@@ -305,7 +317,14 @@ module Minitest
           options[:include] = nil
           options[:exclude] = /.*/
         else
-          options[:include] = Regexp.new("\\A(?:#{exact.join("|")})\\z")
+          options[:include] = "/\\A(?:#{exact.join("|")})\\z/"
+          # Rails composes line filters with the positive filter using OR.
+          # Exclude all other loaded tests so it cannot re-add cached tests.
+          loaded = Minitest::Runnable.runnables.flat_map do |klass|
+            klass.runnable_methods.map { |method| "#{klass}##{method}" }
+          end
+          omitted = (loaded - selected).map { |id| Regexp.escape(id) }
+          options[:exclude] = Regexp.new("\\A(?:#{omitted.join("|")})\\z")
         end
       end
 

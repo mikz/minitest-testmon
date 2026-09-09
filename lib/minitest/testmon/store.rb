@@ -497,12 +497,12 @@ module Minitest
         @database.execute("DELETE FROM test_inputs WHERE test_id = ?", [snapshot.test_id])
         snapshot.inputs.each do |input|
           raise PhaseError, "unknown input cannot be published: #{input.id}" unless input.known?
-          @database.execute(
-            <<~SQL,
-              INSERT INTO test_inputs(
-                test_id, provider, input_key, facet, root, relative_path, digest, scope, state
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            SQL
+          @snapshot_input_insert ||= @database.prepare(<<~SQL)
+            INSERT INTO test_inputs(
+              test_id, provider, input_key, facet, root, relative_path, digest, scope, state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          SQL
+          @snapshot_input_insert.execute(
             [
               snapshot.test_id, input.provider, input.key, input.facet, input.root,
               input.relative_path, input.fingerprint.digest, input.scope.to_s,
@@ -661,6 +661,9 @@ module Minitest
           nil
         end
         raise
+      ensure
+        @snapshot_input_insert&.close
+        @snapshot_input_insert = nil
       end
 
       def prune_run_receipts

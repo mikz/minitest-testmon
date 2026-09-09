@@ -87,7 +87,8 @@ module Minitest
       end
 
       def to_h
-        observation_categories = categorize_observations
+        paths = {}
+        observation_categories = categorize_observations(paths)
         inventory_categories = categorize_inventory
         {
           schema_version: SCHEMA_VERSION,
@@ -101,7 +102,7 @@ module Minitest
           tests: @tests,
           observations: observation_categories.transform_values { |items| category(items) },
           inventory: inventory_categories.transform_values { |items| category(items) },
-          suggestions: suggestions,
+          suggestions: suggestions(paths),
           publication: publication,
           checkpoints: {count: 0, accepted_ids: [], stop_reason: nil}
         }
@@ -131,18 +132,18 @@ module Minitest
         )
       end
 
-      def categorize_observations
+      def categorize_observations(paths)
         result = {claimed: [], ignored: [], uncovered: [], unresolved: []}
         observations.each do |observation|
           claimed_keys = observation_claims.fetch(observation.key, [])
           if claimed_keys.any?
-            claimed_keys.each { |key| result[:claimed] << observation_item(observation, key: key) }
+            claimed_keys.each { |key| result[:claimed] << observation_item(observation, paths, key: key) }
           elsif IGNORED_REASONS.include?(observation.reason)
-            result[:ignored] << observation_item(observation)
+            result[:ignored] << observation_item(observation, paths)
           elsif observation.unresolved?
-            result[:unresolved] << observation_item(observation)
+            result[:unresolved] << observation_item(observation, paths)
           else
-            result[:uncovered] << observation_item(observation).merge(reason: uncovered_reason(observation))
+            result[:uncovered] << observation_item(observation, paths).merge(reason: uncovered_reason(observation))
           end
         end
         result
@@ -178,34 +179,34 @@ module Minitest
         {count: sorted.length, items: sorted}
       end
 
-      def suggestions
+      def suggestions(paths)
         values = []
         observations.each do |observation|
           claimed = observation_claims.fetch(observation.key, []).any?
           ignored = IGNORED_REASONS.include?(observation.reason)
           if observation.reason == :opaque_c_call
-            values << suggestion("opaque_c_call", observation, ruby: "observe a public Ruby wrapper that exposes the input path")
-            values << suggestion("outside_root", observation, ruby: "config.root :shared, \"../shared\"")
-            values << suggestion("path_set_churn", observation, ruby: "facet :membership, inventory: :files, digest: :paths, granularity: :set")
+            values << suggestion("opaque_c_call", observation, paths, ruby: "observe a public Ruby wrapper that exposes the input path")
+            values << suggestion("outside_root", observation, paths, ruby: "config.root :shared, \"../shared\"")
+            values << suggestion("path_set_churn", observation, paths, ruby: "facet :membership, inventory: :files, digest: :paths, granularity: :set")
           elsif observation.reason == :outside_root
-            values << suggestion("outside_root", observation, ruby: "config.root :shared, \"../shared\"")
+            values << suggestion("outside_root", observation, paths, ruby: "config.root :shared, \"../shared\"")
           elsif !claimed && !ignored && !observation.unresolved?
             values << if observation.kind == :path_set
-              suggestion("path_set_churn", observation, ruby: "facet :membership, inventory: :files, digest: :paths, granularity: :set")
+              suggestion("path_set_churn", observation, paths, ruby: "facet :membership, inventory: :files, digest: :paths, granularity: :set")
             elsif observation.operation.to_s.include?(".")
-              suggestion("uncovered_notification", observation, ruby: "claim :#{observation.kind}, to: [:files, :content], path: :path")
+              suggestion("uncovered_notification", observation, paths, ruby: "claim :#{observation.kind}, to: [:files, :content], path: :path")
             else
-              suggestion("uncovered_file", observation, ruby: "claim :#{observation.kind}, to: [:files, :content], path: :path")
+              suggestion("uncovered_file", observation, paths, ruby: "claim :#{observation.kind}, to: [:files, :content], path: :path")
             end
           end
         end
         values.uniq.sort_by { |item| [item[:code], item[:path].to_s, item[:event].to_s, item[:ruby].to_s] }
       end
 
-      def suggestion(code, observation, ruby:)
+      def suggestion(code, observation, paths, ruby:)
         {
           code: code,
-          path: (code == "outside_root") ? nil : logical_path(observation.path),
+          path: (code == "outside_root") ? nil : logical_path(observation.path, paths),
           event: observation.operation&.to_s || observation.kind.to_s,
           ruby: ruby
         }
@@ -216,22 +217,28 @@ module Minitest
         (%i[file_read file_open path_set].include?(observation.kind) || observation.path) ? "uncovered_file" : "uncovered_event"
       end
 
-      def observation_item(observation, key: nil)
+      def observation_item(observation, paths, key: nil)
         item = observation.report_item
-        item[:path] = logical_path(item[:path])
+        item[:path] = logical_path(item[:path], paths)
         if item[:callsite]
-          item[:callsite] = item[:callsite].merge(path: logical_path(item[:callsite][:path]))
+          item[:callsite] = item[:callsite].merge(path: logical_path(item[:callsite][:path], paths))
         end
         item[:key] = key || Digest::SHA256.hexdigest(CanonicalJSON.generate(item.except(:key)))
         item
       end
 
-      def logical_path(path)
+      def logical_path(path, paths)
         return path unless resolver && path
         return path if resolver.logical?(path)
-        resolver.resolve(path).key
-      rescue PathError, ArgumentError
-        path
+        # This is a rendering-pass cache, not persisted dependency evidence.
+        # Repeated claims share a path; a later rendering resolves it afresh.
+        paths.fetch(path) do
+          paths[path] = begin
+            resolver.resolve(path).key
+          rescue PathError, ArgumentError
+            path
+          end
+        end
       end
 
       def operation_priority(operation)

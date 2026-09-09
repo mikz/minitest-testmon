@@ -99,6 +99,55 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_publication_reuses_one_input_statement_across_snapshots_and_closes_it
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, store.revision)
+      store.acquire_lease!(run_id: "prepared")
+      store.start_execution(run_id: "prepared", selection: selection)
+      statements = track_input_statements(store)
+      snapshots = ids.to_h do |id|
+        [id, snapshot(id, input("one", "v1"), "prepared").with(inputs: [input("one", "v1"), input("two", "v2")])]
+      end
+      report = Report.build(discovered: ids, selected: ids, executed: ids)
+      store.publish(evidence("prepared", selection, report, snapshots: snapshots, outcomes: ids.to_h { |id| [id, :passed] }))
+
+      assert_equal 1, statements.length
+      assert statements.first.closed?
+      assert_equal [2, 2], store.snapshots_for(ids).values.map { |value| value.inputs.length }
+      assert_empty store.retries_for(ids)
+    end
+  end
+
+  def test_failed_checkpoint_closes_statement_and_next_transaction_prepares_again
+    with_store do |store|
+      ids = %w[OneTest#test_one TwoTest#test_two]
+      selection = selection_for(ids, ids, store.revision)
+      store.acquire_lease!(run_id: "prepared")
+      store.start_execution(run_id: "prepared", selection: selection)
+      statements = track_input_statements(store)
+      first = snapshot(ids.first, input("one", "v1"), "prepared")
+      unknown = input("other", "v1").with(fingerprint: Minitest::Testmon::Fingerprint.unknown(:source_race))
+      second = snapshot(ids.last, unknown, "prepared")
+      assert_raises(Minitest::Testmon::PhaseError) do
+        store.checkpoint(run_id: "prepared", base_revision: nil, snapshots: [first, second])
+      end
+      assert_equal 1, statements.length
+      assert statements.first.closed?
+      assert_empty store.snapshots_for(ids)
+      assert_nil store.revision
+      assert_equal ids, store.retries_for(ids).keys
+      assert_empty store.checkpoint_progress("prepared").fetch("accepted_ids")
+
+      store.checkpoint(run_id: "prepared", base_revision: nil, snapshots: [first])
+      assert_equal 2, statements.length
+      assert statements.last.closed?
+      assert_equal [ids.first], store.snapshots_for(ids).keys
+      assert_equal [ids.last], store.retries_for(ids).keys
+      assert_equal 1, store.revision
+    end
+  end
+
   def test_incomplete_source_drift_and_invalid_ledger_reject_publication
     cases = [
       [{complete: false}, "provider_incomplete"],
@@ -284,6 +333,18 @@ class StoreTest < TestmonTestCase
   end
 
   private
+
+  def track_input_statements(store)
+    database = store.instance_variable_get(:@database)
+    original = database.method(:prepare)
+    statements = []
+    database.define_singleton_method(:prepare) do |sql, *arguments, &block|
+      statement = original.call(sql, *arguments, &block)
+      statements << statement if sql.include?("INSERT INTO test_inputs(")
+      statement
+    end
+    statements
+  end
 
   def with_store
     with_project do |project|

@@ -3,6 +3,43 @@
 require_relative "test_helper"
 
 class DiscoveryReportTest < TestmonTestCase
+  def test_rendering_resolves_each_path_once_and_refreshes_the_next_render
+    with_project do |project|
+      first = write_file(File.join(project, "first.rb"), "42\n")
+      second = write_file(File.join(project, "second.rb"), "43\n")
+      path = File.join(project, "alias.rb")
+      File.symlink(first, path)
+      resolver = Minitest::Testmon::PathResolver.new(project: project)
+      original = resolver.method(:resolve)
+      resolutions = []
+      resolver.define_singleton_method(:resolve) do |value|
+        resolutions << value
+        original.call(value)
+      end
+      observations = 2.times.map do |index|
+        Minitest::Testmon::Observation.build(
+          kind: :file_read, path: path, test_id: "Example#test_#{index}",
+          callsite: {path: path, line: 1}
+        )
+      end
+      report = Minitest::Testmon::DiscoveryReport.new(
+        context_signature: "context", observations: observations, resolver: resolver,
+        observation_claims: {observations.first.key => %w[first second]}
+      )
+      rendered = report.to_h
+      assert_equal [path], resolutions
+      assert_equal ["project:first.rb"], rendered.dig(:observations, :claimed, :items).map { |item| item[:path] }.uniq
+      assert_equal "project:first.rb", rendered.fetch(:suggestions).first.fetch(:path)
+
+      File.unlink(path)
+      File.symlink(second, path)
+      rendered = report.to_h
+      assert_equal [path, path], resolutions
+      assert_equal "project:second.rb", rendered.dig(:observations, :uncovered, :items, 0, :path)
+      assert_equal "project:second.rb", rendered.fetch(:suggestions).first.fetch(:path)
+    end
+  end
+
   def test_frozen_shape_and_claim_keys_are_deterministic
     fingerprint = Minitest::Testmon::Fingerprint.known("abc")
     artifact = Minitest::Testmon::Artifact.new(

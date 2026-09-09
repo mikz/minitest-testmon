@@ -481,6 +481,70 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_cold_schema_is_not_visible_until_its_metadata_is_complete
+    with_project do |project|
+      visible = []
+      klass = Class.new(Minitest::Testmon::Store) do
+        define_method(:create_suite_input_schema!) do
+          reader = SQLite3::Database.new(path, readonly: true)
+          visible << reader.get_first_value("SELECT name FROM sqlite_master WHERE name='metadata'")
+          reader.close
+          super()
+        end
+      end
+      store = klass.new(File.join(project, "state.sqlite3"))
+      assert_equal [nil], visible
+      reopened = Minitest::Testmon::Store.new(store.path)
+      assert_empty Dir["#{store.path}.incompatible-*"]
+    ensure
+      reopened&.close
+      store&.close
+    end
+  end
+
+  def test_brief_external_reader_does_not_reject_lease_acquisition
+    with_store do |store|
+      script = <<~RUBY_CHILD
+        require "sqlite3"
+        database = SQLite3::Database.new(ARGV.fetch(0), readonly: true)
+        database.execute("BEGIN")
+        database.execute("SELECT * FROM metadata")
+        STDOUT.sync = true
+        puts "locked"
+        sleep 0.05
+        database.execute("COMMIT")
+        database.close
+      RUBY_CHILD
+      IO.popen([RbConfig.ruby, "-e", script, store.path], "r") do |reader|
+        assert_equal "locked\n", reader.gets
+        assert store.acquire_lease!(run_id: "reader-contention")
+      end
+      contender = Minitest::Testmon::Store.new(store.path)
+      assert_raises(Minitest::Testmon::LeaseUnavailable) { contender.acquire_lease!(run_id: "contender") }
+    ensure
+      contender&.close
+    end
+  end
+
+  def test_competing_initializer_is_revalidated_without_quarantine
+    with_project do |project|
+      klass = Class.new(Minitest::Testmon::Store) do
+        define_method(:create_schema!) do
+          # The first absence check has already happened. Model another opener
+          # finishing its atomic initialization before this opener gets the lock.
+          other = Minitest::Testmon::Store.new(path)
+          other.close
+          super()
+        end
+      end
+      store = klass.new(File.join(project, "state.sqlite3"))
+      assert_equal Minitest::Testmon::Store::SCHEMA_VERSION.to_s, store.send(:metadata, "schema_version")
+      assert_empty Dir["#{store.path}.incompatible-*"]
+    ensure
+      store&.close
+    end
+  end
+
   private
 
   def track_input_statements(store)

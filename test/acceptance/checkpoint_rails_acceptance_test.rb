@@ -19,19 +19,28 @@ class CheckpointRailsAcceptanceTest < Minitest::Test
       RUBY_TEST
       process = cli.start_flagged(env: runtime.env)
       accepted = []
-      wait_for("Rails workers did not commit a checkpoint", timeout: 40) do
-        if cli.state_path.file?
-          database = SQLite3::Database.new(cli.state_path.to_s, readonly: true)
-          begin
-            next false unless database.get_first_value("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'test_snapshots'")
-            accepted = database.execute("SELECT test_id FROM test_snapshots").flatten
-          rescue SQLite3::BusyException
-            next false
-          ensure
-            database.close
+      begin
+        wait_for("Rails workers did not commit a checkpoint", timeout: 40) do
+          if cli.state_path.file?
+            database = SQLite3::Database.new(cli.state_path.to_s, readonly: true)
+            begin
+              if database.get_first_value("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'test_snapshots'")
+                accepted = database.execute("SELECT test_id FROM test_snapshots").flatten
+              end
+            rescue SQLite3::BusyException
+              # Still check for an exited child when the database is busy.
+            ensure
+              database.close
+            end
           end
+          next true if accepted.length >= 25
+          if (exited = Process.waitpid2(process.pid, Process::WNOHANG))
+            flunk "Rails exited before committing a checkpoint: #{exited.last.inspect}"
+          end
+          false
         end
-        accepted.length >= 25
+      rescue Minitest::Assertion => error
+        flunk "#{error.message}\n#{checkpoint_diagnostics(cli, process)}"
       end
       Process.kill("KILL", -process.pid)
       cli.finish(process)
@@ -50,5 +59,23 @@ class CheckpointRailsAcceptanceTest < Minitest::Test
     ensure
       cli.finish(process, timeout: 1) if process
     end
+  end
+
+  private
+
+  def checkpoint_diagnostics(cli, process)
+    diagnostics = ["stdout:\n#{process.stdout_path.read}", "stderr:\n#{process.stderr_path.read}"]
+    if cli.state_path.file?
+      database = SQLite3::Database.new(cli.state_path.to_s, readonly: true)
+      database.results_as_hash = true
+      diagnostics << "receipts: #{database.execute("SELECT id, state, publication_reason, checkpoint_json FROM run_receipts").inspect}"
+      diagnostics << "snapshots: #{database.get_first_value("SELECT count(*) FROM test_snapshots")}"
+      diagnostics << "retries: #{database.execute("SELECT outcome, count(*) AS count FROM retry_tests GROUP BY outcome").inspect}"
+    end
+    diagnostics.join("\n")
+  rescue SQLite3::Exception => error
+    [*diagnostics, "SQLite diagnostics unavailable: #{error.message}"].join("\n")
+  ensure
+    database&.close
   end
 end

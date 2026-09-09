@@ -366,7 +366,9 @@ module Minitest
       def connect
         @database = SQLite3::Database.new(path)
         @database.results_as_hash = true
-        @database.busy_timeout = 0
+        # Brief physical reader locks must not reject an otherwise valid write.
+        # Logical lease ownership is checked separately and never retried.
+        @database.busy_timeout = 250
         @database.execute("PRAGMA foreign_keys = ON")
       end
 
@@ -377,10 +379,10 @@ module Minitest
           migrate_checkpoint_schema! if %w[6 7].include?(metadata("schema_version"))
           migrate_suite_input_schema! if metadata("schema_version") == "8"
           raise SchemaIncompatible, "schema mismatch" unless metadata("schema_version") == SCHEMA_VERSION.to_s
-        elsif database_empty?
-          create_schema!
         else
-          raise SchemaIncompatible, "metadata table is missing"
+          # Another opener may finish initialization before this one gets the
+          # creation lock. Revalidate its committed schema after releasing it.
+          validate_or_rebuild! unless create_schema!
         end
       rescue SQLite3::BusyException, SQLite3::LockedException
         raise LeaseUnavailable, "cache_lease_unavailable"
@@ -401,6 +403,15 @@ module Minitest
       end
 
       def create_schema!
+        transaction do
+          next false if schema_present?
+          raise SchemaIncompatible, "metadata table is missing" unless database_empty?
+          write_schema!
+          true
+        end
+      end
+
+      def write_schema!
         @database.execute_batch(<<~SQL)
           PRAGMA foreign_keys = ON;
           CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -457,6 +468,7 @@ module Minitest
 
       def migrate_checkpoint_schema!
         transaction do
+          next unless %w[6 7].include?(metadata("schema_version"))
           owner = @database.get_first_value("SELECT owner_pid FROM leases WHERE name = 'cache'")
           raise LeaseUnavailable, "cache_lease_unavailable" if owner && process_alive?(Integer(owner))
           if metadata("schema_version") == "6"
@@ -496,6 +508,7 @@ module Minitest
 
       def migrate_suite_input_schema!
         transaction do
+          next unless metadata("schema_version") == "8"
           owner = @database.get_first_value("SELECT owner_pid FROM leases WHERE name = 'cache'")
           raise LeaseUnavailable, "cache_lease_unavailable" if owner && process_alive?(Integer(owner))
           create_suite_input_schema!

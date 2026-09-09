@@ -143,6 +143,8 @@ module Minitest
 
       def canonical_class_value(value)
         case value
+        when Pathname
+          value.to_s.dup.freeze
         when Symbol
           value.to_s.freeze
         when Array

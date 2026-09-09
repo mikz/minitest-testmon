@@ -240,8 +240,16 @@ module Minitest
         root_path = @resolver.root(inventory.root)
         base = File.expand_path(inventory.base, root_path)
         eligible_locator_keys = locators.map(&:key).to_h { |key| [key, true] }
+        # A fresh stat belongs only to this manifest pass. Regular entries
+        # need no separate directory/file queries; symlink targets still do.
+        stats = {}
         entries = paths
-          .reject { |path| File.directory?(path) }
+          .reject do |path|
+            stat = stats[path] = File.lstat(path)
+            stat.directory? || (stat.symlink? && File.directory?(path))
+          rescue SystemCallError
+            File.directory?(path)
+          end
           .reject do |path|
             next false unless ruby_source_inventory?(inventory.name)
 
@@ -252,8 +260,8 @@ module Minitest
           end
           .map do |path|
           locator = resolved[path] || @resolver.resolve(path, allow_missing: false)
-          stat = File.lstat(path)
-          regular = File.file?(path)
+          stat = stats[path] || File.lstat(path)
+          regular = stat.file? || (stat.symlink? && File.file?(path))
           context.incomplete(:non_regular) unless regular
           {
             lexical_path: relative_inventory_path(path, root_path),

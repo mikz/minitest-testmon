@@ -7,6 +7,18 @@ require "minitest/testmon" if Minitest::Testmon::Environment.enabled?
 module Minitest
   register_plugin :testmon unless extensions.include?(:testmon) || extensions.include?("testmon")
 
+  module TestmonPluginOrder
+    def init_plugins(options)
+      # Rails can register reporters from test_helper after option parsing.
+      # Attach Testmon after those plugins have replaced the output reporter.
+      extensions.delete_if { |extension| extension.to_s == "testmon" }
+      register_plugin :testmon
+      super
+    end
+  end
+
+  singleton_class.prepend(TestmonPluginOrder)
+
   def self.plugin_testmon_options(parser, options)
     return if options[:minitest_testmon_options_registered]
 
@@ -24,10 +36,6 @@ module Minitest
     parser.on("--testmon-db [PATH]", "Use a specific testmon SQLite database") do |path|
       options[:testmon_database_given] = true
       path ? options[:testmon_database] = path : options[:testmon_usage_error] = "--testmon-db requires PATH"
-    end
-    parser.on_tail do
-      extensions.delete_if { |extension| extension.to_s == "testmon" }
-      register_plugin :testmon
     end
   end
 

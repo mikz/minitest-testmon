@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Finalize focused Rails cache receipts when minitest-reporters is loaded from test_helper after option parsing.
+
 - Support environment-enabled focused Rails suites, names, paths, and line
   ranges, including `db:test:prepare test:system`. Preserve omitted snapshots
   and previously learned shared inputs during focused runs.

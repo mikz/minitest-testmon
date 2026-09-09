@@ -212,7 +212,15 @@ Attribution inside a system test relies on an explicit operating assumption:
   existence-only input still fails closed instead of allowing later tests to
   use stale shared state.
 
-The stamp lasts only for the request or configuration operation and borrows
+- With `playwright-ruby-client`, Testmon also attributes `Page` and
+  `BrowserContext` route handlers and `on`/`once` listeners for the duration of
+  each callback. The browser must belong to the sole active test, and callbacks
+  must finish within its boundary. Persistent registrations produce suite-scoped
+  evidence. Removing a listener with `off` or a handler with `unroute` keeps the
+  original callback identity. Other asynchronous APIs and unrelated background
+  work remain subject to the normal attribution checks.
+
+The stamp lasts only for the request, configuration operation, or callback and borrows
 the boundary's revocable attribution token. Child threads whose block belongs
 to the sealed Ruby source inventory (including project configuration)
 inherit that token and evidence scope. Persistent gem-owned Puma and Playwright

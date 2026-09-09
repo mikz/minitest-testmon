@@ -35,6 +35,12 @@ if defined?(Rails::Railtie)
             if ENV[RailsBootstrap::COMMAND_ENV]
               require "minitest/testmon/request_attribution"
               app.middleware.unshift(Minitest::Testmon::RequestAttribution)
+              if Gem.loaded_specs.key?("playwright-ruby-client")
+                require "playwright"
+                require "minitest/testmon/playwright_callback_attribution"
+                Playwright::Page.prepend(Minitest::Testmon::PlaywrightCallbackAttribution)
+                Playwright::BrowserContext.prepend(Minitest::Testmon::PlaywrightCallbackAttribution)
+              end
               if Gem.loaded_specs.key?("puma")
                 require "puma"
                 require "puma/configuration"

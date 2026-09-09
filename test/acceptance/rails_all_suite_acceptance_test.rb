@@ -48,6 +48,52 @@ class RailsAllSuiteAcceptanceTest < Minitest::Test
     end
   end
 
+  def test_browser_route_and_event_callbacks_publish_and_warm
+    assert_browser_callbacks(workers: 1)
+  end
+
+  def test_parallel_browser_route_and_event_callbacks_publish_and_warm
+    assert_browser_callbacks(workers: 2)
+  end
+
+  def assert_browser_callbacks(workers:)
+    with_rails_cli_project(workers:) do |project, runtime, cli|
+      project.write("test/system/offline_browser_test.rb", <<~RUBY)
+        require "application_system_test_case"
+        class OfflineBrowserTest < ApplicationSystemTestCase
+          test "routes and events run on browser dispatcher threads" do
+            visit "/greeting"
+            failed = Queue.new
+            page.driver.with_playwright_page do |browser|
+              handler = ->(route, request) { route.fulfill(status: 200, body: "handler should have been removed") }
+              browser.context.route("**/blocked", ->(route, request) { route.abort(errorCode: "blockedbyclient") })
+              browser.route("**/blocked", handler)
+              browser.unroute("**/blocked", handler: handler)
+              removed = ->(request) { failed << "listener was not removed" }
+              browser.on("requestfailed", removed)
+              browser.off("requestfailed", removed)
+              browser.on("requestfailed", ->(request) { failed << request.failure })
+            end
+            rejected = page.evaluate_async_script(<<~JS)
+              const done = arguments[arguments.length - 1];
+              fetch('/blocked').then(() => done(false), () => done(true));
+            JS
+            assert rejected
+            assert_match(/ERR_BLOCKED_BY_CLIENT/, failed.pop)
+          end
+        end
+      RUBY
+      browser_env = {"RAILS_ACCEPTANCE_BROWSER" => "1"}
+      cold, report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env, timeout: 90)
+      assert cold.success?, cli_failure("browser callbacks", cold)
+      assert_empty report.fetch("diagnostics")
+      assert report.dig("publication", "published"), report.fetch("observations").inspect
+      warm, warm_report = run_cli(runtime, cli, command: "test:all", extra_env: browser_env)
+      assert warm.success?, cli_failure("browser callbacks warm", warm)
+      assert_empty warm_report.dig("tests", "selected")
+    end
+  end
+
   def test_all_suite_learns_publishes_and_certifies_including_system_tests
     with_rails_cli_project do |_project, runtime, cli|
       cold, cold_report = run_cli(runtime, cli, command: "test:all")

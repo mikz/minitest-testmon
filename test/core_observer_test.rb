@@ -50,6 +50,48 @@ class CoreObserverTest < TestmonTestCase
     end
   end
 
+  def test_disabled_file_observation_keeps_project_accessors_without_generic_io
+    with_project do |project|
+      data = write_file(File.join(project, "data.txt"), "payload")
+      attributes = write_file(File.join(project, "attributes.rb"), <<~RUBY)
+        class TestmonFileGateAttributes
+          attr_reader :value, :read
+        end
+      RUBY
+      reader = write_file(File.join(project, "reader.rb"), <<~RUBY)
+        module TestmonFileGateReader
+          def self.call
+            File.read(#{data.dump})
+          end
+        end
+      RUBY
+      load attributes
+      load reader
+      [false, true].each do |observe_files|
+        session = RecordingSession.new
+        observer = Minitest::Testmon::CoreObserver.new(session,
+          resolver: Minitest::Testmon::PathResolver.new(project: project),
+          ruby_paths: [attributes, reader], observe_files:).start
+        object = TestmonFileGateAttributes.new
+        Minitest::Testmon::ExecutionContext.with_test("FileGateTest#value") { object.value }
+        Minitest::Testmon::ExecutionContext.with_test("FileGateTest#read") { object.read }
+        Minitest::Testmon::ExecutionContext.with_test("FileGateTest#file") do
+          assert_equal "payload", TestmonFileGateReader.call
+        end
+        generic = session.observations.select { |observation| observation.kind == :file_read }
+        assert_equal observe_files, generic.any? { |observation| observation.reason == :opaque_c_call }
+        assert_empty generic unless observe_files
+        native = session.observations.select { |observation| observation.operation == :native_method_call }
+        assert_equal ["FileGateTest#read", "FileGateTest#value"], native.map(&:test_id).sort
+      ensure
+        observer&.close
+      end
+    ensure
+      Object.send(:remove_const, :TestmonFileGateReader) if Object.const_defined?(:TestmonFileGateReader, false)
+      Object.send(:remove_const, :TestmonFileGateAttributes) if Object.const_defined?(:TestmonFileGateAttributes, false)
+    end
+  end
+
   def test_native_event_identity_does_not_dispatch_to_the_receiver
     receiver = Object.new
     receiver.define_singleton_method(:equal?) { |*| raise "receiver identity dispatched" }

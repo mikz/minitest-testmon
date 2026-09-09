@@ -282,6 +282,8 @@ module Minitest
           return
         end
 
+        return unless @observe_files
+
         if File === receiver && INSTANCE_READS.include?(event.method_id)
           return unless @tracked_files.key?(receiver)
           path = receiver.path

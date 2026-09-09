@@ -327,6 +327,27 @@ class RailsCliAcceptanceTest < Minitest::Test
     end
   end
 
+  def test_focused_reporter_runs_finalize_and_reuse_cache
+    [1, 2].each do |workers|
+      with_rails_cli_project(workers:) do |_project, runtime, cli|
+        env = runtime.env.merge(
+          "MINITEST_TESTMON" => "1", "MINITEST_TESTMON_DB" => cli.state_path.to_s,
+          "RAILS_ACCEPTANCE_REPORTERS" => "1"
+        )
+        cold = cli.plain(env:, arguments: ["test/models/widget_test.rb"])
+        assert cold.success?, cli_failure("focused reporter run", cold)
+        report = cli.report
+        assert report.dig("publication", "published"), "focused reporter did not finalize its receipt"
+        assert_equal ["WidgetTest#test_declared_fixture"], report.dig("tests", "executed")
+        warm = cli.plain(env:, arguments: ["test/models/widget_test.rb"])
+        assert warm.success?, cli_failure("focused reporter warm run", warm)
+        report = cli.report
+        assert report.dig("publication", "published")
+        assert_empty report.dig("tests", "selected")
+      end
+    end
+  end
+
   def test_line_filters_do_not_readd_cached_tests
     with_rails_cli_project do |project, runtime, cli|
       path = "test/models/line_filter_test.rb"

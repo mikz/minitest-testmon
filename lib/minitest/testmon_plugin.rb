@@ -7,6 +7,12 @@ require "minitest/testmon" if Minitest::Testmon::Environment.enabled?
 module Minitest
   register_plugin :testmon unless extensions.include?(:testmon) || extensions.include?("testmon")
 
+  module TestmonLateInitialization
+    def self.minitest_plugin_init(options)
+      Minitest.plugin_testmon_init(options)
+    end
+  end
+
   def self.plugin_testmon_options(parser, options)
     return if options[:minitest_testmon_options_registered]
 
@@ -50,6 +56,14 @@ module Minitest
     reject_testmon_usage!(options)
     return unless options[:testmon]
     return if options[:minitest_testmon_initialized]
+
+    # A late-loaded Rails helper can register minitest-reporters after us.
+    # Minitest visits appended module plugins after its existing plugins.
+    unless options[:minitest_testmon_options_registered] || options[:minitest_testmon_initialization_deferred]
+      options[:minitest_testmon_initialization_deferred] = true
+      register_plugin TestmonLateInitialization unless extensions.include?(TestmonLateInitialization)
+      return
+    end
 
     require "minitest/testmon" unless defined?(Minitest::Testmon::Runtime)
     options[:minitest_testmon_initialized] = true

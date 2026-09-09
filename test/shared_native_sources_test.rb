@@ -3,6 +3,41 @@
 require_relative "test_helper"
 
 class SharedNativeSourcesTest < TestmonTestCase
+  def test_native_test_source_requires_only_the_ruby_facet_on_an_unchanged_warm_run
+    with_project do |project|
+      source = write_file(File.join(project, "test/native_fixture_test.rb"), "class NativeFixture; attr_reader :value; end\n")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      session = snapshot.observe
+      runtime = promotion_runtime(snapshot, session)
+      runtime.send(:promote_native_sources, {File.realpath(source) => 1})
+      # Full discovery clears retained IDs; explicit source evidence must match
+      # exactly the source input required at the next startup.
+      session.retain_suite_input_ids!([])
+      assert session.finalize.complete?
+      native_inputs = snapshot.current_inputs.select { |input| input.relative_path == "test/native_fixture_test.rb" }
+      assert_equal %w[content ruby_source], native_inputs.map(&:facet).sort
+      ruby_source = native_inputs.find { |input| input.facet == "ruby_source" }
+      assert_equal [ruby_source.id], runtime.instance_variable_get(:@suite_input_ids)
+      learned = Minitest::Testmon::SnapshotBuilder.new.call(test_id: "OtherTest#unrelated", current_inputs: session.current_inputs,
+        claimed_input_ids: [], test_definition_input: nil, recorded_at: "now", run_id: "cold")
+      store = Minitest::Testmon::Store.new(File.join(project, "warm.sqlite3"))
+      store.acquire_lease!(run_id: "cold")
+      cold = Minitest::Testmon::Selection.new(discovered: [learned.test_id], selected: [learned.test_id],
+        reasons_by_test: {learned.test_id => ["no_trace"]}, base_revision: nil)
+      store.start_execution(run_id: "cold", selection: cold)
+      store.checkpoint(run_id: "cold", base_revision: nil, snapshots: [learned])
+      warm = Minitest::Testmon::Selector.new.call(discovered: [learned.test_id], current_inputs: runtime.send(:current_inputs),
+        snapshots: store.snapshots_for([learned.test_id]), retries: {}, base_revision: store.revision,
+        suite_input_ids: runtime.instance_variable_get(:@suite_input_ids))
+      assert_empty warm.selected
+    ensure
+      store&.close
+      session&.finalize if session&.instance_variable_get(:@phase) == :observing
+    end
+  end
+
   def test_source_loaded_through_alias_uses_the_configured_external_root_identity
     with_project do |project|
       with_project do |external|

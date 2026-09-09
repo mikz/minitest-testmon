@@ -369,7 +369,10 @@ module Minitest
         definition = provider.definition if provider.respond_to?(:definition)
         provider_id = definition.id.to_s if definition.respond_to?(:id)
         @snapshot.context.artifacts.each do |artifact|
-          next unless artifact.provider.to_s == provider_id && artifact.whole_file? && artifact.root && artifact.relative_path
+          # Ruby-source artifacts use :whole_file identity. Content artifacts
+          # (including test definitions for the same path) use :content and are
+          # not claimed by the explicit coverage_lines evidence recorded below.
+          next unless artifact.provider.to_s == provider_id && artifact.identity == :whole_file && artifact.root && artifact.relative_path
           path = File.expand_path(artifact.relative_path, @snapshot.context.resolver.root(artifact.root))
           next unless locations.key?(path)
           ids[artifact.to_input.id] = true

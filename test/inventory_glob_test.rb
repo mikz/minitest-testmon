@@ -31,7 +31,7 @@ class InventoryGlobTest < TestmonTestCase
     end
   end
 
-  def test_excluded_subtrees_are_never_globbed
+  def test_subtree_pruning
     with_tree do |project|
       provider, inventory = subject(project, ["**/*"], %w[vendor/**/* node_modules/**/* .git/**/*])
       original = Dir.method(:glob)

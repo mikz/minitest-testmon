@@ -213,7 +213,7 @@ module Minitest
 
       def build_snapshots(outcomes)
         recorded_at = Time.now.utc.iso8601(6)
-        builder = SnapshotBuilder.new
+        builder = (@snapshot_builder ||= SnapshotBuilder.new)
         outcomes.filter_map do |test_id, outcome|
           next unless outcome == :passed
           definition = @snapshot.test_definition_input(test_id)

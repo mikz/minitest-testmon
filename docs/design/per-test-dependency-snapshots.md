@@ -71,13 +71,15 @@ ordinary per-test snapshots through the same comparison path.
 
 ## Durable schema
 
-The selection tables are intentionally literal:
+Each test still owns its complete historical input list. Schema 9 stores identical
+suite input lists once, using immutable content-addressed sets:
 
 ```sql
 test_snapshots(
   test_id TEXT PRIMARY KEY,
   recorded_at TEXT NOT NULL,
-  run_id TEXT NOT NULL
+  run_id TEXT NOT NULL,
+  suite_input_set_id TEXT REFERENCES suite_input_sets(id)
 )
 
 test_inputs(
@@ -88,6 +90,7 @@ test_inputs(
   root TEXT,
   relative_path TEXT,
   digest TEXT,
+  scope TEXT NOT NULL CHECK (scope IN ('test', 'suite')),
   state TEXT NOT NULL CHECK (state IN ('known', 'missing')),
   PRIMARY KEY(test_id, provider, input_key)
 )
@@ -98,6 +101,23 @@ retry_tests(
   updated_at TEXT NOT NULL
 )
 ```
+
+`suite_input_sets` stores the set ID. `suite_input_set_members` stores the same
+input columns as `test_inputs`, with a set ID instead of a test ID. The set ID
+hashes every persisted input field in canonical order, including fingerprint
+state and scope. Different historical fingerprints therefore remain separate
+sets. Store reconstructs the same public `TestSnapshot.inputs` list and expands
+shared members for explanation queries; selection and provider scopes do not
+change.
+
+Versions 6 and 7 first migrate to schema 8, then to schema 9. Existing input rows
+remain untouched until their test snapshot is replaced. New writes store only
+test-scoped inputs in `test_inputs`; the snapshot references its immutable suite
+set. Set creation and snapshot replacement use the same checkpoint transaction.
+Rollback clears transaction-local set caches. Unreferenced sets are retained;
+there is no orphan cleanup. Older binaries retain their existing behavior of
+quarantining unfamiliar schema versions, so downgrade compatibility is not
+provided.
 
 `metadata`, `leases`, and `run_receipts` hold the schema/revision, exclusive
 writer lease, and retained reports. There is no separate fingerprints table,

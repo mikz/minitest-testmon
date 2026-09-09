@@ -3,6 +3,44 @@
 require_relative "test_helper"
 
 class RuntimeTest < TestmonTestCase
+  def test_snapshot_builder_reuses_catalog_until_immutable_inputs_change
+    fingerprint = Minitest::Testmon::Fingerprint.known("digest")
+    definition = Minitest::Testmon::Input.new(key: "test", provider: "test", facet: "content", fingerprint: fingerprint)
+    inputs = [definition].freeze
+    session = Struct.new(:current_inputs) do
+      def claimed_input_ids(_test_id) = []
+    end.new(inputs)
+    snapshot = Object.new
+    snapshot.define_singleton_method(:test_definition_input) { |_test_id| definition }
+    builder_class = Class.new(Minitest::Testmon::SnapshotBuilder) do
+      attr_reader :index_builds
+
+      private
+
+      def index_inputs(inputs)
+        @index_builds = @index_builds.to_i + 1 unless inputs.frozen? && inputs.equal?(@indexed_inputs)
+        super
+      end
+    end
+    builder = builder_class.new
+    runtime = Minitest::Testmon::Runtime.allocate
+    runtime.instance_variable_set(:@snapshot, snapshot)
+    runtime.instance_variable_set(:@session, session)
+    runtime.instance_variable_set(:@run_id, "run")
+    runtime.instance_variable_set(:@snapshot_builder, builder)
+    outcomes = {"Example#test" => :passed}
+    first = runtime.build_snapshots(outcomes)
+    second = runtime.build_snapshots(outcomes)
+    assert_equal 1, builder.index_builds
+    assert_equal first.fetch("Example#test").inputs, second.fetch("Example#test").inputs
+
+    shared = definition.with(key: "shared", scope: :suite)
+    session.current_inputs = [definition, shared].freeze
+    updated = runtime.build_snapshots(outcomes)
+    assert_equal 2, builder.index_builds
+    assert_includes updated.fetch("Example#test").inputs, shared
+  end
+
   def test_checkpoint_cadence_preserves_initial_progress_and_amortizes_expensive_batches
     runtime = Minitest::Testmon::Runtime.allocate
     runtime.instance_variable_set(:@last_checkpoint_at, 0.0)

@@ -283,7 +283,7 @@ module Minitest
     end
 
     class ProviderSession
-      attr_reader :snapshot, :claimed_input_ids_by_test, :current_inputs
+      attr_reader :snapshot, :claimed_input_ids_by_test, :current_inputs, :catalog_generation, :suite_generation
 
       def initialize(snapshot, tests:, selected:, suite_input_ids: [])
         @snapshot = snapshot
@@ -300,6 +300,9 @@ module Minitest
         @phase = :created
         @claimed_input_ids_by_test = {}.freeze
         @current_inputs = snapshot.current_inputs
+        @catalog_generation = 0
+        @suite_generation = 0
+        @claimed_input_generations = Hash.new(0)
       end
 
       def global_trace_router
@@ -353,6 +356,10 @@ module Minitest
       def retain_suite_input_ids!(input_ids)
         raise PhaseError, "selection is closed" unless @phase == :observing
         @suite_input_ids = Array(input_ids).uniq.freeze
+      end
+
+      def claimed_input_generation(test_id)
+        @claimed_input_generations[test_id.to_s]
       end
 
       def claimed_input_ids(test_id)
@@ -473,6 +480,7 @@ module Minitest
         @checkpoint_inputs ||= snapshot.current_inputs.to_h { |input| [input.id, input] }
         artifacts = claims.artifacts.drop(@checkpoint_artifact_count || 0)
         @checkpoint_artifact_count = claims.artifacts.length
+        catalog_changed = false
         artifacts.each do |artifact|
           input = artifact.to_input
           previous = @checkpoint_inputs[input.id]
@@ -480,18 +488,32 @@ module Minitest
             input = input.with(scope: :suite)
           end
           @checkpoint_invalid = true if !input.known? || Observation::UNRESOLVED_REASONS.include?(artifact.reason)
-          @checkpoint_inputs[input.id] = input
+          unless previous == input
+            @checkpoint_inputs[input.id] = input
+            catalog_changed = true
+          end
         end
         @checkpoint_dependencies ||= Hash.new { |hash, key| hash[key] = {} }
         dependencies = claims.dependencies.drop(@checkpoint_dependency_count || 0)
         @checkpoint_dependency_count = claims.dependencies.length
+        changed_tests = {}
         dependencies.each do |dependency|
           next if dependency.test_id == "*"
           id = InputId.new(provider: dependency.provider, key: dependency.artifact_key)
-          @checkpoint_dependencies[dependency.test_id][id] = true
+          ids = @checkpoint_dependencies[dependency.test_id]
+          next if ids.key?(id)
+          ids[id] = true
+          changed_tests[dependency.test_id] = true
         end
-        @claimed_input_ids_by_test = @checkpoint_dependencies.transform_values { |ids| ids.keys.freeze }.freeze
-        @current_inputs = @checkpoint_inputs.values.freeze
+        unless changed_tests.empty?
+          updated = @claimed_input_ids_by_test.dup
+          changed_tests.each_key do |test_id|
+            updated[test_id] = @checkpoint_dependencies.fetch(test_id).keys.sort_by(&:to_s).freeze
+            @claimed_input_generations[test_id] += 1
+          end
+          @claimed_input_ids_by_test = updated.freeze
+        end
+        replace_current_inputs(@checkpoint_inputs.values.sort_by { |input| input.id.to_s }.freeze) if catalog_changed
         DiscoveryReport.new(context_signature: snapshot.signature,
           complete: !@checkpoint_invalid, diagnostics: claims.diagnostics)
       end
@@ -554,7 +576,7 @@ module Minitest
       end
 
       def build_report(claims)
-        @claimed_input_ids_by_test = claims.dependencies
+        claimed_ids = claims.dependencies
           .reject { |dependency| dependency.test_id == "*" }
           .group_by(&:test_id)
           .to_h do |test_id, dependencies|
@@ -566,6 +588,7 @@ module Minitest
           .sort_by(&:first)
           .to_h
           .freeze
+        replace_claimed_input_ids(claimed_ids)
         artifacts = deduplicate_artifacts(claims.artifacts)
         artifacts = retain_suite_artifacts(artifacts, claims)
         context_input = snapshot.current_inputs.find { |input| input.key == "$context" }
@@ -575,7 +598,7 @@ module Minitest
         unless duplicates.empty?
           claims.incomplete("duplicate_provider_input:#{duplicates.map(&:to_s).sort.join(",")}")
         end
-        @current_inputs = inputs.uniq(&:id).sort_by { |input| input.id.to_s }.freeze
+        replace_current_inputs(inputs.uniq(&:id).sort_by { |input| input.id.to_s }.freeze)
 
         DiscoveryReport.new(
           context_signature: snapshot.signature,
@@ -594,6 +617,24 @@ module Minitest
           complete: true,
           resolver: snapshot.context.resolver
         )
+      end
+
+      def replace_current_inputs(inputs)
+        return if @current_inputs == inputs
+        @suite_generation += 1 unless @current_inputs.select(&:suite?) == inputs.select(&:suite?)
+        @catalog_generation += 1
+        @current_inputs = inputs
+      end
+
+      def replace_claimed_input_ids(updated)
+        return if @claimed_input_ids_by_test == updated
+        previous = @claimed_input_ids_by_test
+        (previous.keys | updated.keys).each do |test_id|
+          @claimed_input_generations[test_id] += 1 unless previous[test_id] == updated[test_id]
+        end
+        @claimed_input_ids_by_test = updated.to_h do |test_id, ids|
+          [test_id, (previous[test_id] == ids) ? previous[test_id] : ids]
+        end.freeze
       end
 
       def transition!(from, to)

@@ -98,15 +98,28 @@ module Minitest
 
         def fixture_layout_digest(configuration)
           resolver = PathResolver.new(configuration.roots)
-          layout = fixture_test_cases.map do |test_case|
+          logical_paths = lambda do |test_case|
             paths = Array(test_case.fixture_paths).map do |path|
               resolver.resolve(path.to_s).key
             rescue PathError
               # Unowned roots cannot contribute publishable fixture evidence.
               "unavailable"
             end
-            # Anonymous classes have no stable identity across processes. Keep
-            # their layouts (including duplicates), never their object addresses.
+            paths
+          end
+          base = defined?(ActiveSupport::TestCase) && ActiveSupport::TestCase
+          base_paths = base ? logical_paths.call(base) : []
+          layout = fixture_test_cases.filter_map do |test_case|
+            paths = logical_paths.call(test_case)
+            # Focused discovery loads fewer test classes. Rails helpers may
+            # append the inherited list again; complete repetitions preserve
+            # default precedence. Partial repeats and nondefault orders do not.
+            inherited_layout = paths == base_paths || (!base_paths.empty? &&
+              (paths.length % base_paths.length).zero? &&
+              paths.each_slice(base_paths.length).all? { |slice| slice == base_paths })
+            next if test_case != base && inherited_layout
+            # Preserve named associations for nondefault layouts, including
+            # inherited overrides. Anonymous classes never expose object IDs.
             [test_case.name || "<anonymous>", paths]
           end
           Digest::SHA256.hexdigest(CanonicalJSON.generate(layout.sort_by { |item| CanonicalJSON.generate(item) }))

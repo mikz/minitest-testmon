@@ -255,7 +255,7 @@ class RailsCliAcceptanceTest < Minitest::Test
       {
         "rails.views@1" => "runtime_views/greetings/runtime.html.erb",
         "rails.locales@1" => "runtime_locales/en.yml",
-        "rails.fixtures@1" => "test/manual_fixtures/manual_widgets.yml"
+        "rails.fixtures@2" => "test/manual_fixtures/manual_widgets.yml"
       }.each do |provider, path|
         assert MinitestTestmonAcceptance::RailsOracle.assert_provider_claim!(
           cold,

@@ -120,6 +120,29 @@ class RailsFixturesTest < TestmonTestCase
     self.class.send(:remove_const, :OrderedFixtureCase) if self.class.const_defined?(:OrderedFixtureCase, false)
   end
 
+  def test_inherited_fixture_layout_does_not_change_with_discovered_test_classes
+    with_fixture_snapshot do |snapshot, _fixture_set, project, _first, second|
+      named = Class.new(ActiveSupport::TestCase)
+      self.class.const_set(:InheritedFixtureCase, named)
+      anonymous = Class.new(ActiveSupport::TestCase)
+      defaults = ActiveSupport::TestCase.fixture_paths
+      named.define_singleton_method(:fixture_paths) { defaults * 2 }
+      expanded = fixture_snapshot(project, File.dirname(second))
+      assert_equal snapshot.signature, expanded.signature
+      assert_nil anonymous.name
+    end
+  ensure
+    self.class.send(:remove_const, :InheritedFixtureCase) if self.class.const_defined?(:InheritedFixtureCase, false)
+  end
+
+  def test_partial_fixture_path_repetition_preserves_changed_precedence
+    with_fixture_snapshot do |snapshot, _fixture_set, project, first, second|
+      ActiveSupport::TestCase.define_singleton_method(:fixture_paths) { [first, second, first] }
+      changed = fixture_snapshot(project, File.dirname(second))
+      refute_equal snapshot.signature, changed.signature
+    end
+  end
+
   def test_layout_identity_is_stable_across_checkouts_and_anonymous_classes
     signatures = 2.times.map do
       with_fixture_snapshot do |_snapshot, _fixture_set, project, _first, second|

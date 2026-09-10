@@ -40,6 +40,8 @@ module Minitest
       def install(options)
         installed = false
         ThreadContextPropagation.install!
+        ConcurrentContextPropagation.install!
+        ActionCableContextPropagation.install!
         @exit_state = options.fetch(:minitest_testmon_exit_state)
         discovered = discovered_tests(options)
         @discovered = discovered

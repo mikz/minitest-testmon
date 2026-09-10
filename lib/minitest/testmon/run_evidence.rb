@@ -13,9 +13,10 @@ module Minitest
       :snapshots,
       :complete,
       :source_stable,
-      :publication_reason
+      :publication_reason,
+      :final_suite_inputs
     ) do
-      def initialize(run_id:, base_revision:, report:, selection:, outcomes:, snapshots:, complete:, source_stable:, publication_reason: nil)
+      def initialize(run_id:, base_revision:, report:, selection:, outcomes:, snapshots:, complete:, source_stable:, publication_reason: nil, final_suite_inputs: [])
         normalized_outcomes = outcomes.to_h.transform_keys(&:to_s).transform_values(&:to_sym).sort.to_h.freeze
         invalid = normalized_outcomes.values - RUN_OUTCOMES
         raise ArgumentError, "invalid outcomes: #{invalid.uniq.join(", ")}" unless invalid.empty?
@@ -28,6 +29,7 @@ module Minitest
           selection: selection,
           outcomes: normalized_outcomes,
           snapshots: normalized_snapshots,
+          final_suite_inputs: Array(final_suite_inputs).dup.freeze,
           complete: !!complete,
           source_stable: !!source_stable,
           publication_reason: publication_reason&.to_s&.freeze

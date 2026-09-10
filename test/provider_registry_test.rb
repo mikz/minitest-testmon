@@ -3,6 +3,37 @@
 require_relative "test_helper"
 
 class ProviderRegistryTest < TestmonTestCase
+  def test_resolved_but_unclaimed_direct_read_blocks_publication
+    with_project do |project|
+      path = write_file(File.join(project, "data.txt"), "input")
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :custom, version: 1 do
+        inventory :settings, root: :project, include: "settings.json"
+        facet :content, inventory: :settings, digest: :content, granularity: :file
+      end
+      session = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration).observe
+      session.record(Minitest::Testmon::Observation.build(kind: :file_read,
+        path: path, test_id: "Reader#test", details: {path_argument: true}))
+      report = session.finalize
+      refute report.complete?
+      assert_includes report.diagnostics, "uncovered_file"
+    end
+  end
+
+  def test_core_direct_reads_do_not_enable_global_native_file_auditing
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      configuration.provider :custom, version: 1 do
+        inventory :settings, root: :project, include: "settings.json"
+        facet :content, inventory: :settings, digest: :content, granularity: :file
+      end
+      configuration.provider :ruby, Minitest::Testmon::CoreProvider.new(configuration), version: 1
+      snapshot = Minitest::Testmon::ProviderRegistry.new.snapshot(configuration)
+      assert snapshot.claims_event?(:file_read)
+      refute snapshot.file_audit_required?
+    end
+  end
+
   def test_artifact_aggregation_preserves_canonical_representative_and_test_ownership
     base = Minitest::Testmon::Artifact.new(key: 'quoted"input', provider: :example,
       root: :project, relative_path: "žluťoučký.txt", facet: :content,

@@ -14,6 +14,22 @@ ActiveSupport::TestCase.parallelize(
 )
 
 module ProductAcceptance
+  def assert_only_direct_read_api_changed(clean, active)
+    %w[File.singleton IO.singleton].each do |target|
+      %w[read binread].each do |operation|
+        assert_equal "Minitest::Testmon::DirectFileReads::Methods", active.fetch(target).fetch(operation).fetch("owner")
+        active.fetch(target)[operation] = clean.fetch(target).fetch(operation)
+      end
+    end
+    %w[File.singleton IO.singleton].each do |target|
+      ancestors = active.fetch("ancestors").fetch(target)
+      assert_equal 1, ancestors.count("Minitest::Testmon::DirectFileReads::Methods")
+      ancestors.delete("Minitest::Testmon::DirectFileReads::Methods")
+    end
+    assert_equal clean, active,
+      "observer changed File/IO/Pathname/Psych/JSON method ownership, signatures, source locations, or ancestors"
+  end
+
   def driver
     @driver ||= MinitestTestmonAcceptance::Driver.new
   end

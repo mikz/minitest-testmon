@@ -370,8 +370,7 @@ class RailsAcceptanceTest < Minitest::Test
       )
       assert active.success?, rails_failure("active Rails API probe", active)
       refute_includes active.stderr, "ActiveSupport::Concurrency::LoadInterlockAwareMonitor"
-      assert_equal JSON.parse(clean_path.read), JSON.parse(active_path.read),
-        "observer changed Rails method owners, signatures, source locations, or ancestors"
+      assert_only_direct_read_api_changed JSON.parse(clean_path.read), JSON.parse(active_path.read)
     end
   end
 

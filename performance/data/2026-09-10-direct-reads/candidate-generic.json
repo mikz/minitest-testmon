@@ -1,0 +1,260 @@
+{
+  "ruby": "ruby 4.0.6 (2026-07-14 revision 03b6d3f889) +PRISM [arm64-darwin25]",
+  "seed": 417,
+  "tests": 24,
+  "iterations": 160,
+  "sources": 121,
+  "shared_configuration_inputs": 0,
+  "results": [
+    {
+      "label": "pair0-off",
+      "enabled": false,
+      "wall_s": 0.19125699996948242,
+      "metrics": {
+        "test_body_s": 0.05658299941569567,
+        "process_cpu_s": 0.171376
+      }
+    },
+    {
+      "label": "pair0-on",
+      "enabled": true,
+      "wall_s": 0.9461099999025464,
+      "metrics": {
+        "native_filter": true,
+        "install_s": 0.04209900018759072,
+        "test_body_s": 0.3192850004415959,
+        "flush_checkpoints_s": 0.2846310008317232,
+        "report_s": 0.3356099999509752,
+        "process_cpu_s": 0.924537
+      },
+      "selected": [
+        "Work0Test#test_payload",
+        "Work10Test#test_payload",
+        "Work11Test#test_payload",
+        "Work12Test#test_payload",
+        "Work13Test#test_payload",
+        "Work14Test#test_payload",
+        "Work15Test#test_payload",
+        "Work16Test#test_payload",
+        "Work17Test#test_payload",
+        "Work18Test#test_payload",
+        "Work19Test#test_payload",
+        "Work1Test#test_payload",
+        "Work20Test#test_payload",
+        "Work21Test#test_payload",
+        "Work22Test#test_payload",
+        "Work23Test#test_payload",
+        "Work2Test#test_payload",
+        "Work3Test#test_payload",
+        "Work4Test#test_payload",
+        "Work5Test#test_payload",
+        "Work6Test#test_payload",
+        "Work7Test#test_payload",
+        "Work8Test#test_payload",
+        "Work9Test#test_payload"
+      ],
+      "retained": 24,
+      "retry": 0,
+      "suite_members_per_set": [
+        5
+      ]
+    },
+    {
+      "label": "pair1-on",
+      "enabled": true,
+      "wall_s": 0.9105220001656562,
+      "metrics": {
+        "native_filter": true,
+        "install_s": 0.04047899995930493,
+        "test_body_s": 0.31241699983365834,
+        "flush_checkpoints_s": 0.27294700033962727,
+        "report_s": 0.3224530001170933,
+        "process_cpu_s": 0.889561
+      },
+      "selected": [
+        "Work0Test#test_payload",
+        "Work10Test#test_payload",
+        "Work11Test#test_payload",
+        "Work12Test#test_payload",
+        "Work13Test#test_payload",
+        "Work14Test#test_payload",
+        "Work15Test#test_payload",
+        "Work16Test#test_payload",
+        "Work17Test#test_payload",
+        "Work18Test#test_payload",
+        "Work19Test#test_payload",
+        "Work1Test#test_payload",
+        "Work20Test#test_payload",
+        "Work21Test#test_payload",
+        "Work22Test#test_payload",
+        "Work23Test#test_payload",
+        "Work2Test#test_payload",
+        "Work3Test#test_payload",
+        "Work4Test#test_payload",
+        "Work5Test#test_payload",
+        "Work6Test#test_payload",
+        "Work7Test#test_payload",
+        "Work8Test#test_payload",
+        "Work9Test#test_payload"
+      ],
+      "retained": 24,
+      "retry": 0,
+      "suite_members_per_set": [
+        5
+      ]
+    },
+    {
+      "label": "pair1-off",
+      "enabled": false,
+      "wall_s": 0.17497300007380545,
+      "metrics": {
+        "test_body_s": 0.053476999048143625,
+        "process_cpu_s": 0.15819
+      }
+    },
+    {
+      "label": "pair2-off",
+      "enabled": false,
+      "wall_s": 0.1745289999525994,
+      "metrics": {
+        "test_body_s": 0.05243900022469461,
+        "process_cpu_s": 0.156986
+      }
+    },
+    {
+      "label": "pair2-on",
+      "enabled": true,
+      "wall_s": 0.9404390000272542,
+      "metrics": {
+        "native_filter": true,
+        "install_s": 0.039963999995961785,
+        "test_body_s": 0.3152500002179295,
+        "flush_checkpoints_s": 0.29085099999792874,
+        "report_s": 0.3435140000656247,
+        "process_cpu_s": 0.9197690000000001
+      },
+      "selected": [
+        "Work0Test#test_payload",
+        "Work10Test#test_payload",
+        "Work11Test#test_payload",
+        "Work12Test#test_payload",
+        "Work13Test#test_payload",
+        "Work14Test#test_payload",
+        "Work15Test#test_payload",
+        "Work16Test#test_payload",
+        "Work17Test#test_payload",
+        "Work18Test#test_payload",
+        "Work19Test#test_payload",
+        "Work1Test#test_payload",
+        "Work20Test#test_payload",
+        "Work21Test#test_payload",
+        "Work22Test#test_payload",
+        "Work23Test#test_payload",
+        "Work2Test#test_payload",
+        "Work3Test#test_payload",
+        "Work4Test#test_payload",
+        "Work5Test#test_payload",
+        "Work6Test#test_payload",
+        "Work7Test#test_payload",
+        "Work8Test#test_payload",
+        "Work9Test#test_payload"
+      ],
+      "retained": 24,
+      "retry": 0,
+      "suite_members_per_set": [
+        5
+      ]
+    },
+    {
+      "label": "warm",
+      "enabled": true,
+      "wall_s": 0.3659649998880923,
+      "metrics": {
+        "native_filter": true,
+        "install_s": 0.046670000068843365,
+        "flush_checkpoints_s": 3.00002284348011e-06,
+        "report_s": 0.07683500018902123,
+        "process_cpu_s": 0.34728000000000003
+      },
+      "selected": [],
+      "retained": 24,
+      "retry": 0,
+      "suite_members_per_set": [
+        5
+      ]
+    },
+    {
+      "label": "ordinary-change",
+      "enabled": true,
+      "wall_s": 0.6455570000689477,
+      "metrics": {
+        "native_filter": true,
+        "install_s": 0.04764100001193583,
+        "test_body_s": 0.016527999890968204,
+        "flush_checkpoints_s": 0.2843229998834431,
+        "report_s": 0.3351209999527782,
+        "process_cpu_s": 0.626331
+      },
+      "selected": [
+        "Work0Test#test_payload"
+      ],
+      "retained": 24,
+      "retry": 0,
+      "suite_members_per_set": [
+        5
+      ]
+    },
+    {
+      "label": "accessor-change",
+      "enabled": true,
+      "wall_s": 0.9926050000358373,
+      "metrics": {
+        "native_filter": true,
+        "install_s": 0.04813600005581975,
+        "test_body_s": 0.3247900002170354,
+        "flush_checkpoints_s": 0.3033439996652305,
+        "report_s": 0.3571619999129325,
+        "process_cpu_s": 0.971983
+      },
+      "selected": [
+        "Work0Test#test_payload",
+        "Work10Test#test_payload",
+        "Work11Test#test_payload",
+        "Work12Test#test_payload",
+        "Work13Test#test_payload",
+        "Work14Test#test_payload",
+        "Work15Test#test_payload",
+        "Work16Test#test_payload",
+        "Work17Test#test_payload",
+        "Work18Test#test_payload",
+        "Work19Test#test_payload",
+        "Work1Test#test_payload",
+        "Work20Test#test_payload",
+        "Work21Test#test_payload",
+        "Work22Test#test_payload",
+        "Work23Test#test_payload",
+        "Work2Test#test_payload",
+        "Work3Test#test_payload",
+        "Work4Test#test_payload",
+        "Work5Test#test_payload",
+        "Work6Test#test_payload",
+        "Work7Test#test_payload",
+        "Work8Test#test_payload",
+        "Work9Test#test_payload"
+      ],
+      "retained": 24,
+      "retry": 0,
+      "suite_members_per_set": [
+        5
+      ]
+    }
+  ],
+  "paired_overhead_percent": [
+    394.6799333114661,
+    420.37857256924696,
+    438.8439745157936
+  ],
+  "testmon_commit": "cee1a771c9dd91433a087b36cef831c3ab835a34",
+  "profile": "generic",
+  "provenance": "Local macOS arm64 isolated deterministic harness; default settings, three alternating off/on pairs."
+}

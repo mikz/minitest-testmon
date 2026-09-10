@@ -1,0 +1,15 @@
+[
+  {
+    "mode": "on",
+    "wall_seconds": 420.42018390499993,
+    "exit": 124,
+    "child_user_seconds": 41.319067,
+    "child_system_seconds": 7.009306,
+    "counts": null,
+    "publication": null,
+    "diagnostics": null,
+    "snapshots": 763,
+    "retries": 109,
+    "selected": null
+  }
+]

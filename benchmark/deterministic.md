@@ -36,8 +36,9 @@ Installation excludes Ruby/gem loading before Runtime starts. Instrumentation is
 identical between paired workloads where the corresponding phase exists.
 
 This is a small synthetic regression workload, not representative Rails
-performance or proof of a full-suite 30% overhead target. Default generic file
+performance or proof of a full-suite overhead target. Default generic file
 auditing remains enabled; Rails process workers and browser work are absent.
+Keep selected measurements and experiment decisions in [performance/](../performance/README.md).
 
 ## Optional shared configuration profile
 

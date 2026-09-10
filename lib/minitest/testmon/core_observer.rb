@@ -114,6 +114,10 @@ module Minitest
       rescue PathError
         if @observe_files
           safe_record(Observation.build(kind: :file_read, operation: operation,
+            path: File.expand_path(path),
+            callsite: {path: location.absolute_path || location.path, line: location.lineno, owner: receiver.name},
+            exists_at_observation: File.exist?(path),
+            details: {path_argument: true},
             test_id: ExecutionContext.current_test, reason: :outside_root))
         end
       rescue => error

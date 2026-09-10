@@ -49,6 +49,10 @@ module Minitest
       end
 
       def project_locator(path)
+        if @resolver.logical?(path)
+          root, relative = path.to_s.split(":", 2)
+          path = File.join(@resolver.root(root.to_sym), relative)
+        end
         locator = @resolver.resolve(path)
         return unless locator.root == :project
         return if excluded?(locator)

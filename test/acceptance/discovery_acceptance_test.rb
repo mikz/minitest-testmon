@@ -84,12 +84,12 @@ class DiscoveryAcceptanceTest < Minitest::Test
     end
   end
 
-  def test_direct_c_file_read_is_opaque_and_unresolved
+  def test_direct_file_read_is_claimed_with_its_actual_path
     require_product!
 
     with_discovery_report do |report|
-      assert_observation report, :unresolved,
-        kind: "file_read", reason: "opaque_c_call"
+      assert_observation report, :claimed,
+        kind: "file_read", path: %r{data/direct\.txt\z}, operation: "read"
     end
   end
 
@@ -128,7 +128,7 @@ class DiscoveryAcceptanceTest < Minitest::Test
       report = driver.report(project)
       assert_report_contract report
       assert_equal false, report.fetch("ready"),
-        "source-race and opaque C observations must prevent readiness"
+        "source-race observations must prevent readiness"
       assert_nil report.fetch("generation")
       assert_equal false, report.dig("publication", "published")
       yield report

@@ -243,6 +243,7 @@ module Minitest
 
       def observe(trace)
         return if @closed || !matching?(trace)
+        return if trace.event == :c_call && DirectFileReads.wrapper_call?(trace)
         wrapper = TraceObservation.new(trace)
         if opaque_file_call?(trace)
           return unless callsite_in_root?(trace.path)

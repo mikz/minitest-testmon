@@ -79,7 +79,7 @@ class CoreObserverTest < TestmonTestCase
           assert_equal "payload", TestmonFileGateReader.call
         end
         generic = session.observations.select { |observation| observation.kind == :file_read }
-        assert_equal observe_files, generic.any? { |observation| observation.reason == :opaque_c_call }
+        assert_equal observe_files, generic.any? { |observation| observation.path == File.realpath(data) }
         assert_empty generic unless observe_files
         native = session.observations.select { |observation| observation.operation == :native_method_call }
         assert_empty native
@@ -104,7 +104,7 @@ class CoreObserverTest < TestmonTestCase
     observer.send(:observe_c_call, event)
   end
 
-  def test_file_object_is_resolved_and_direct_c_read_is_unresolved
+  def test_file_object_and_direct_read_have_exact_paths
     with_project do |project|
       data = write_file(File.join(project, "data.txt"), "value")
       script = write_file(File.join(project, "read.rb"), <<~RUBY)
@@ -122,10 +122,10 @@ class CoreObserverTest < TestmonTestCase
       opaque = session.observations.find { |item| item.reason == :opaque_c_call }
       exact = session.observations.find { |item| item.kind == :file_read && item.path == File.realpath(data) }
       construction = session.observations.find { |item| item.reason == :conservative_file_construction }
-      refute_nil opaque
+      assert_nil opaque
       refute_nil exact
       refute_nil construction
-      assert_equal({path: "project:read.rb", line: 1, owner: "#<Class:IO>"}, opaque.callsite)
+      assert_equal({path: "project:read.rb", line: 1, owner: "File"}, exact.callsite)
     end
   end
 

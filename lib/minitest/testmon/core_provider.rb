@@ -78,6 +78,7 @@ module Minitest
           builder.claim :coverage_lines, to: target, path: :path
           builder.claim :ruby_script, to: target, path: :path
           builder.claim :ruby_require, to: target, path: :path
+          builder.claim :file_read, to: target, path: :path
           builder.claim :test_definition,
             to: target,
             path: ->(observation) { observation.details["path"] || observation.details[:path] }

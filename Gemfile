@@ -21,5 +21,5 @@ group :test do
   gem "propshaft", "~> 1.3"
   gem "puma", "~> 8.0"
   gem "rails", "~> 8.1.0"
-  gem "simplecov", "~> 0.22", require: false
+  gem "simplecov", "~> 1.2", require: false
 end

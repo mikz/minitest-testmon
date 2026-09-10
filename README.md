@@ -250,3 +250,4 @@ rationale and load-order guidance.
 - [Discovery and validation](docs/discovery.md)
 - [Rails 8.1](docs/rails.md)
 - [Coverage, SimpleCov, and Rubydex](docs/coverage-and-simplecov.md)
+- [Performance measurements and experiment records](performance/README.md)

@@ -1,0 +1,60 @@
+[
+  {
+    "mode": "off",
+    "wall_seconds": 264.40352341100004,
+    "exit": 0,
+    "child_user_seconds": 252.25363,
+    "child_system_seconds": 44.986169,
+    "counts": [
+      872,
+      9944,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "mode": "on",
+    "wall_seconds": 399.29147252,
+    "exit": 0,
+    "child_user_seconds": 491.453814,
+    "child_system_seconds": 51.50316800000001,
+    "counts": [
+      872,
+      9944,
+      0,
+      0,
+      0
+    ],
+    "publication": {
+      "published": true,
+      "reason": null
+    },
+    "diagnostics": [],
+    "snapshots": 872,
+    "retries": 0,
+    "selected": 872
+  },
+  {
+    "mode": "warm",
+    "wall_seconds": 24.26819875900003,
+    "exit": 0,
+    "child_user_seconds": 22.39680599999997,
+    "child_system_seconds": 2.408467999999999,
+    "counts": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "publication": {
+      "published": true,
+      "reason": null
+    },
+    "diagnostics": [],
+    "snapshots": 872,
+    "retries": 0,
+    "selected": 0
+  }
+]

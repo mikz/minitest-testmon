@@ -40,6 +40,8 @@ module Minitest
       def install(options)
         installed = false
         ThreadContextPropagation.install!
+        ConcurrentContextPropagation.install!
+        ActionCableContextPropagation.install!
         @exit_state = options.fetch(:minitest_testmon_exit_state)
         discovered = discovered_tests(options)
         @discovered = discovered
@@ -258,6 +260,7 @@ module Minitest
           snapshots: snapshots,
           complete: report.complete? && !@learning_stopped && accepted_valid,
           source_stable: source_stable,
+          final_suite_inputs: @session.current_inputs.select(&:suite?),
           publication_reason: (@learning_stopped && ((@learning_stopped == "source_drift") ? "source_drift" : "provider_incomplete")) || publication_reason
         )
       end

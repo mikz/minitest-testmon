@@ -89,6 +89,22 @@ class CheckpointRuntimeTest < TestmonTestCase
     end
   end
 
+  def test_method_names_containing_hash_are_checkpointed_and_reused
+    with_checkpoint_project do |project|
+      File.open(File.join(project, "test/example_test.rb"), "a") do |file|
+        file.puts 'CheckpointExample.define_method("test_Mailer#action_has_a_named_preview") { assert_equal 2, 1 + 1 }'
+      end
+      id = "CheckpointExample#test_Mailer#action_has_a_named_preview"
+      cold = finish_run(project)
+      assert cold.dig("publication", "published"), cold.fetch("publication").inspect
+      assert_includes cold.dig("checkpoints", "accepted_ids"), id
+      assert_equal 31, snapshots_count(project)
+      warm = finish_run(project)
+      assert_empty warm.dig("tests", "selected")
+      assert warm.dig("publication", "published")
+    end
+  end
+
   private
 
   def with_checkpoint_project

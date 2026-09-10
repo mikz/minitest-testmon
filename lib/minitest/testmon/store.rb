@@ -17,6 +17,7 @@ module Minitest
     class Store
       SCHEMA_VERSION = 9
       DEFAULT_RETAINED_REPORTS = 10
+      INPUT_COLUMNS = %w[provider input_key facet root relative_path digest scope state].freeze
       SchemaIncompatible = Class.new(StandardError)
 
       attr_reader :path, :recovered_run_id
@@ -251,7 +252,9 @@ module Minitest
             reject_evidence(evidence, "provider_incomplete")
           else
             remaining = evidence.passed_ids - accepted_ids
-            next_revision = remaining.empty? ? revision : (revision || 0) + 1
+            reconciled = reconcile_checkpoint_suite_inputs!(run_id: evidence.run_id,
+              accepted_ids: accepted_ids, passed_ids: evidence.passed_ids, final_suite_inputs: evidence.final_suite_inputs)
+            next_revision = (remaining.empty? && !reconciled) ? revision : (revision || 0) + 1
             remaining.each do |test_id|
               replace_snapshot(evidence.snapshots.fetch(test_id))
               @database.execute("DELETE FROM retry_tests WHERE test_id = ?", [test_id])
@@ -534,6 +537,78 @@ module Minitest
         create_schema!
       rescue SystemCallError => error
         raise Error, "cache_#{kind}_quarantine_failed: #{error.message}"
+      end
+
+      def reconcile_checkpoint_suite_inputs!(run_id:, accepted_ids:, passed_ids:, final_suite_inputs:)
+        final_by_id = {}
+        final_suite_inputs.each do |input|
+          unless input.is_a?(Input) && input.suite? && input.known?
+            raise PhaseError, "invalid final suite input"
+          end
+          raise PhaseError, "duplicate final suite input: #{input.id}" if final_by_id.key?(input.id)
+          final_by_id[input.id] = input
+        end
+        eligible = accepted_ids & passed_ids
+        return false if eligible.empty?
+        snapshots = rows_for_ids("test_snapshots", eligible)
+        unless snapshots.map { |row| row.fetch("test_id") }.sort == eligible.sort &&
+            snapshots.all? { |row| row.fetch("run_id") == run_id }
+          raise PhaseError, "checkpoint snapshot ownership mismatch"
+        end
+        final_rows = PersistedInputSet.new(final_suite_inputs).rows.to_h { |row| [row.first(2), row] }
+        changed = false
+        snapshots.group_by { |row| row["suite_input_set_id"] }.each do |old_set, group|
+          old_rows = old_set ? @database.execute("SELECT * FROM suite_input_set_members WHERE set_id = ?", [old_set]) : []
+          old_by_id = old_rows.to_h { |row| [[row.fetch("provider"), row.fetch("input_key")], row] }
+          additions = []
+          final_rows.each do |id, fields|
+            if (old = old_by_id[id])
+              raise PhaseError, "conflicting final suite input: #{id.join(":")}" unless old.values_at(*INPUT_COLUMNS) == fields
+            else
+              additions << final_by_id.fetch(InputId.new(provider: id.first, key: id.last))
+            end
+          end
+          new_set = if additions.empty?
+            old_set
+          else
+            persist_suite_input_set(old_rows.map { |row| persisted_input(row) } + additions)
+          end
+          ids = group.map { |row| row.fetch("test_id") }
+          changed = reconcile_promoted_inputs!(ids, new_set) || changed if new_set
+          next if new_set == old_set
+          placeholders = (["?"] * ids.length).join(",")
+          @database.execute("UPDATE test_snapshots SET suite_input_set_id = ? WHERE run_id = ? AND test_id IN (#{placeholders})", [new_set, run_id, *ids])
+          raise PhaseError, "checkpoint snapshot ownership changed" unless @database.changes == ids.length
+          changed = true
+        end
+        changed
+      end
+
+      def reconcile_promoted_inputs!(ids, set_id)
+        placeholders = (["?"] * ids.length).join(",")
+        shared_columns = INPUT_COLUMNS.map { |column| "members.#{column} AS shared_#{column}" }.join(", ")
+        collisions = @database.execute(<<~SQL, [set_id, *ids])
+          SELECT inputs.*, #{shared_columns}
+          FROM test_inputs AS inputs JOIN suite_input_set_members AS members
+            ON members.set_id = ? AND members.provider = inputs.provider AND members.input_key = inputs.input_key
+          WHERE inputs.test_id IN (#{placeholders})
+        SQL
+        collisions.each do |row|
+          fields = INPUT_COLUMNS.map { |column| (column == "scope") ? "suite" : row[column] }
+          unless fields == INPUT_COLUMNS.map { |column| row.fetch("shared_#{column}") }
+            raise PhaseError, "conflicting promoted suite input: #{row.fetch("test_id")}:#{row.fetch("input_key")}"
+          end
+        end
+        return false if collisions.empty?
+        @database.execute(<<~SQL, [*ids, set_id])
+          DELETE FROM test_inputs
+          WHERE test_id IN (#{placeholders}) AND EXISTS (
+            SELECT 1 FROM suite_input_set_members AS members WHERE members.set_id = ?
+              AND members.provider = test_inputs.provider AND members.input_key = test_inputs.input_key
+          )
+        SQL
+        raise PhaseError, "promoted suite input rows changed" unless @database.changes == collisions.length
+        true
       end
 
       def replace_snapshot(snapshot)

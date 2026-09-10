@@ -185,7 +185,8 @@ module Minitest
       end
 
       def test_definition_input(test_id)
-        class_name, separator, method_name = test_id.to_s.rpartition("#")
+        # Generated method names can contain "#"; Ruby class names cannot.
+        class_name, separator, method_name = test_id.to_s.partition("#")
         return unless separator == "#" && !class_name.empty? && !method_name.empty?
 
         runnable = if defined?(Minitest::Runnable)

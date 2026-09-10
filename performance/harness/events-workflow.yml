@@ -1,0 +1,47 @@
+name: Testmon isolated performance
+
+on:
+  push:
+    branches: [codex/testmon-native-benchmark]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testmon-performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paired-suite:
+    name: Paired suite (${{ matrix.order }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [off-on, on-off]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install image library
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          bundler-cache: true
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Install browser dependencies
+        run: bun install --frozen-lockfile && bun node_modules/playwright/cli.js install --with-deps chromium
+      - name: Compare identical suites and verify warm reuse
+        env:
+          BENCHMARK_ORDER: ${{ matrix.order }}
+        run: python3 script/testmon-performance.py "$BENCHMARK_ORDER"
+      - name: Preserve measurements and cache evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: testmon-performance-${{ matrix.order }}
+          path: tmp/testmon-performance/
+          if-no-files-found: ignore

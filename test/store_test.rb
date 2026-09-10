@@ -584,7 +584,106 @@ class StoreTest < TestmonTestCase
     end
   end
 
+  def test_final_suite_union_promotes_private_rows_and_preserves_historical_snapshots
+    with_reconciliation_state do |store, base, shared, historical, old_members|
+      before_revision = store.revision
+      report = publish_reconciliation(store, [*base, shared])
+      assert report.publication[:published]
+      assert_equal before_revision + 1, store.revision
+      snapshots = store.snapshots_for(%w[A B C])
+      assert_equal historical, snapshots.fetch("C")
+      assert_equal old_members, store.instance_variable_get(:@database).execute("SELECT * FROM suite_input_set_members WHERE set_id = ?", [old_members.first.fetch("set_id")])
+      %w[A B].each do |id|
+        inputs = snapshots.fetch(id).inputs
+        assert_equal 214, inputs.count(&:suite?)
+        assert_equal inputs.map(&:id).uniq, inputs.map(&:id)
+        assert_includes inputs.map(&:key), "private_#{id}"
+      end
+      selection = Minitest::Testmon::Selector.new.call(discovered: ["A"], current_inputs: snapshots.fetch("A").inputs,
+        snapshots: {"A" => snapshots.fetch("A")}, retries: {}, base_revision: store.revision,
+        suite_input_ids: [*base, shared].map(&:id))
+      assert_empty selection.selected
+    end
+  end
+
+  def test_invalid_final_runs_do_not_enrich_accepted_snapshots
+    [{complete: false}, {source_stable: false}, {outcomes: {"A" => :passed, "B" => :failed}}].each do |options|
+      with_reconciliation_state do |store, base, shared, _historical, _members|
+        before = store.snapshots_for(%w[A B C])
+        revision = store.revision
+        refute publish_reconciliation(store, [*base, shared], **options).publication[:published]
+        assert_equal before, store.snapshots_for(%w[A B C])
+        assert_equal revision, store.revision
+      end
+    end
+  end
+
+  def test_suite_and_promoted_fingerprint_conflicts_roll_back_reconciliation
+    [:suite, :test].each do |scope|
+      with_reconciliation_state(conflict_scope: scope) do |store, base, shared, _historical, _members|
+        database = store.instance_variable_get(:@database)
+        before = store.snapshots_for(%w[A B C])
+        set_count = database.get_first_value("SELECT count(*) FROM suite_input_sets")
+        revision = store.revision
+        assert_raises(Minitest::Testmon::PhaseError) { publish_reconciliation(store, [*base, shared]) }
+        assert_equal before, store.snapshots_for(%w[A B C])
+        assert_equal set_count, database.get_first_value("SELECT count(*) FROM suite_input_sets")
+        assert_equal revision, store.revision
+      end
+    end
+  end
+
+  def test_equal_suite_union_does_not_rewrite_revision_or_skipped_snapshot
+    with_reconciliation_state do |store, base, _shared, _historical, _members|
+      before = store.snapshots_for(%w[A B C])
+      revision = store.revision
+      assert publish_reconciliation(store, base, outcomes: {"A" => :skipped, "B" => :passed}).publication[:published]
+      assert_equal before, store.snapshots_for(%w[A B C])
+      assert_equal revision, store.revision
+      assert_equal :skipped, store.retries_for(["A"]).fetch("A").outcome
+    end
+  end
+
+  def test_final_suite_inputs_reject_unknown_duplicate_and_wrong_scope
+    with_reconciliation_state do |store, base, shared, _historical, _members|
+      [[shared.with(fingerprint: nil)], [shared, shared], [shared.with(scope: :test)]].each do |final|
+        assert_raises(Minitest::Testmon::PhaseError) { publish_reconciliation(store, final) }
+      end
+      missing = shared.with(key: "optional", fingerprint: Minitest::Testmon::Fingerprint.missing)
+      assert publish_reconciliation(store, [*base, shared, missing]).publication[:published]
+      assert_equal :missing, store.snapshots_for(["A"]).fetch("A").inputs.find { |value| value.key == "optional" }.fingerprint.state
+    end
+  end
+
   private
+
+  def with_reconciliation_state(conflict_scope: nil)
+    with_store do |store|
+      base = 213.times.map { |index| input("base#{index}", "v1", scope: :suite) }
+      shared = input("shared", "new", scope: :suite)
+      seed(store, {"C" => base})
+      historical = store.snapshots_for(["C"]).fetch("C")
+      database = store.instance_variable_get(:@database)
+      old_set = database.get_first_value("SELECT suite_input_set_id FROM test_snapshots WHERE test_id = 'C'")
+      old_members = database.execute("SELECT * FROM suite_input_set_members WHERE set_id = ?", [old_set])
+      store.acquire_lease!(run_id: "reconcile")
+      selection = selection_for(%w[A B C], %w[A B], store.revision)
+      store.start_execution(run_id: "reconcile", selection: selection)
+      early = shared.with(scope: :test)
+      early = shared.with(scope: conflict_scope, fingerprint: Minitest::Testmon::Fingerprint.known("old")) if conflict_scope
+      store.checkpoint(run_id: "reconcile", base_revision: store.revision,
+        snapshots: [snapshot("A", [*base, input("private_A", "v1"), early], "reconcile")])
+      store.checkpoint(run_id: "reconcile", base_revision: store.revision,
+        snapshots: [snapshot("B", [*base, input("private_B", "v1"), shared], "reconcile")])
+      yield store, base, shared, historical, old_members
+    end
+  end
+
+  def publish_reconciliation(store, final_suite_inputs, outcomes: {"A" => :passed, "B" => :passed}, **options)
+    selection = selection_for(%w[A B C], %w[A B], store.revision)
+    report = Report.build(discovered: selection.discovered, selected: selection.selected, executed: selection.selected)
+    store.publish(evidence("reconcile", selection, report, snapshots: {}, outcomes: outcomes, final_suite_inputs: final_suite_inputs, **options))
+  end
 
   def track_input_statements(store)
     database = store.instance_variable_get(:@database)
@@ -631,13 +730,13 @@ class StoreTest < TestmonTestCase
   def snapshot(test_id, value, run_id)
     Minitest::Testmon::TestSnapshot.new(
       test_id: test_id,
-      inputs: [value],
+      inputs: value.is_a?(Array) ? value : [value],
       recorded_at: "2026-08-01T00:00:00Z",
       run_id: run_id
     )
   end
 
-  def evidence(run_id, selection, report, snapshots:, outcomes:, complete: true, source_stable: true)
+  def evidence(run_id, selection, report, snapshots:, outcomes:, complete: true, source_stable: true, final_suite_inputs: [])
     Minitest::Testmon::RunEvidence.new(
       run_id: run_id,
       base_revision: selection.base_revision,
@@ -646,7 +745,8 @@ class StoreTest < TestmonTestCase
       outcomes: outcomes,
       snapshots: snapshots,
       complete: complete,
-      source_stable: source_stable
+      source_stable: source_stable,
+      final_suite_inputs: final_suite_inputs
     )
   end
 

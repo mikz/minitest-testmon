@@ -130,6 +130,13 @@ class RuntimeTest < TestmonTestCase
       assert_empty evidence.snapshots
       assert_equal 1, builder.builds
 
+      shared = definition.with(key: "shared", scope: :suite)
+      session.current_inputs = [definition, shared].freeze
+      final = runtime.evidence(report, {id => :passed})
+      assert_equal [shared], final.final_suite_inputs
+      assert final.final_suite_inputs.frozen?
+      assert_empty final.snapshots
+
       late = definition.with(key: "late", scope: :suite, fingerprint: nil)
       session.current_inputs = [definition, late].freeze
       error = assert_raises(ArgumentError) { runtime.evidence(report, {id => :passed}) }

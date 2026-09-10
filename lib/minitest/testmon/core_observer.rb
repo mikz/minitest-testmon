@@ -59,6 +59,7 @@ module Minitest
         events.concat(%i[c_call c_return]) if @observe_files
         @trace = TracePointFactory.build(events, c_call: FILE_CALLS, c_return: {load: true, initialize: File}) { |event| observe(event) }
         @trace.enable
+        DirectFileReads.subscribe(self)
         install_existing_project_targets
         # This is the same startup-only inventory as the native method index it
         # replaces. Script compilation continues to install Ruby targets below.
@@ -72,8 +73,58 @@ module Minitest
       def close
         return if @closed
         @closed = true
+        DirectFileReads.unsubscribe(self)
         @trace&.disable
         @target_traces&.each_value(&:disable)
+      end
+
+      def direct_read_callsite?(location)
+        return false if @closed || (@test_only && !ExecutionContext.current_test)
+        if @ruby_path_policy
+          return !!@ruby_path_policy.project_locator(location.absolute_path || location.path)
+        end
+        locator = @resolver.resolve(location.absolute_path || location.path)
+        locator.root == :project && !nested_testmon_path?(locator.absolute_path)
+      rescue PathError
+        false
+      end
+
+      def record_direct_read(path, operation, location, receiver)
+        locator = @resolver.resolve(path)
+        return if !@observe_files && !ruby_locator(path)
+        return if nested_testmon_path?(locator.absolute_path)
+
+        reason = if !@allowed_roots.include?(locator.root)
+          :outside_root
+        elsif !File.exist?(path)
+          :nonexistent
+        elsif !File.file?(path)
+          :non_regular
+        end
+        safe_record(Observation.build(
+          kind: :file_read,
+          path: locator.absolute_path,
+          operation: operation,
+          test_id: ExecutionContext.current_test,
+          callsite: {path: @resolver.resolve(location.absolute_path || location.path).key, line: location.lineno, owner: receiver.name},
+          exists_at_observation: File.exist?(path),
+          reason: reason,
+          details: {path_argument: true}
+        ))
+      rescue PathError
+        if @observe_files
+          safe_record(Observation.build(kind: :file_read, operation: operation,
+            path: File.expand_path(path),
+            callsite: {path: location.absolute_path || location.path, line: location.lineno, owner: receiver.name},
+            exists_at_observation: File.exist?(path),
+            details: {path_argument: true},
+            test_id: ExecutionContext.current_test, reason: :outside_root))
+        end
+      rescue => error
+        @session.incomplete(:provider_incomplete)
+        safe_record(Observation.build(kind: :provider_error, operation: operation,
+          test_id: ExecutionContext.current_test, reason: :provider_incomplete,
+          details: {error: error.class.name}))
       end
 
       private
@@ -275,6 +326,7 @@ module Minitest
       end
 
       def observe_c_call(event)
+        return if DirectFileReads.wrapper_call?(event)
         receiver = event.self
         if event.method_id == :load && TraceOwner.label(event.defined_class).to_s.include?("Kernel")
           @pending_loads[Thread.current] = true

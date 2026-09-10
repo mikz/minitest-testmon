@@ -213,6 +213,18 @@ module Minitest
         end
       end
 
+      def file_audit_required?
+        registrations.any? do |registration|
+          provider = registration.provider
+          next false unless provider.respond_to?(:definition)
+          definition = provider.definition
+          definition.claims.any? do |claim|
+            %i[file_open file_read].include?(claim.event_kind) &&
+              (definition.name != :ruby || claim.inventory == :project_inputs)
+          end
+        end
+      end
+
       def source_stable?
         validation = current_validation_manifest
         return validation == @validated_manifest if @validated_manifest
@@ -563,7 +575,10 @@ module Minitest
           rescue => error
             claims.incomplete("provider_incomplete:#{registration.name}:#{error.class}")
           end
-          unless claimed || discovery_observation?(observation)
+          if !claimed && (observation.details[:path_argument] || observation.details["path_argument"])
+            claims.unresolved(observation, :uncovered_file)
+            claims.incomplete(:uncovered_file)
+          elsif !claimed && !discovery_observation?(observation)
             claims.incomplete("provider_incomplete:unclaimed:#{observation.kind}")
           end
         end

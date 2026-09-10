@@ -9,6 +9,53 @@ class CLIIntegrationTest < TestmonTestCase
   GEM_ROOT = File.expand_path("..", __dir__)
   EXECUTABLE = File.join(GEM_ROOT, "exe/minitest-testmon")
 
+  def test_direct_reads_publish_reuse_and_invalidate_content_and_membership
+    with_cli_project do |directory, marker|
+      test_path = File.join(directory, "test/value_test.rb")
+      source = File.read(test_path).sub("File.open(template, &:read)", "File.read(Pathname.new(template))")
+      source.prepend("require 'pathname'\n")
+      source << <<~RUBY
+        class RawSourceTest < Minitest::Test
+          def test_unloaded_source_bytes
+            path = File.expand_path('../lib/unloaded.rb', __dir__)
+            assert_equal ENV.fetch('EXPECTED_RAW', '# original'), File.binread(path).strip
+          end
+        end
+      RUBY
+      write_file(test_path, source)
+      write_file(File.join(directory, "lib/unloaded.rb"), "# original\n")
+
+      _out, err, status = invoke(directory, marker, "run")
+      assert status.success?, err
+      cold = read_report(directory)
+      assert_equal true, cold.dig("publication", "published"), cold.inspect
+      assert_equal 3, cold.dig("tests", "executed").size
+      assert_equal 0, cold.dig("observations", "unresolved", "count")
+
+      _out, err, status = invoke(directory, marker, "run")
+      assert status.success?, err
+      assert_empty read_report(directory).dig("tests", "selected")
+
+      write_file(File.join(directory, "templates/example.txt"), "template-v2\n")
+      _out, err, status = invoke(directory, marker, "run", {"EXPECTED_TEMPLATE" => "template-v2"})
+      assert status.success?, err
+      assert_equal ["ValueTest#test_plugin_is_registered_once"], read_report(directory).dig("tests", "selected")
+
+      write_file(File.join(directory, "lib/unloaded.rb"), "# changed comment\n")
+      environment = {"EXPECTED_TEMPLATE" => "template-v2", "EXPECTED_RAW" => "# changed comment"}
+      _out, err, status = invoke(directory, marker, "run", environment)
+      assert status.success?, err
+      assert_equal ["RawSourceTest#test_unloaded_source_bytes"], read_report(directory).dig("tests", "selected")
+
+      write_file(File.join(directory, "lib/added.rb"), "# new inventory member\n")
+      _out, err, status = invoke(directory, marker, "run", environment)
+      assert status.success?, err
+      report = read_report(directory)
+      assert_equal 3, report.dig("tests", "selected").size
+      assert_equal true, report.dig("publication", "published")
+    end
+  end
+
   def test_help_is_successful_and_invalid_usage_is_not
     stdout, stderr, help = Open3.capture3(RbConfig.ruby, EXECUTABLE, "--help")
     assert help.success?, stderr
@@ -246,7 +293,7 @@ class CLIIntegrationTest < TestmonTestCase
               file.puts "test"
             end
             if ENV["INCOMPLETE_PROVIDER"] == "1"
-              assert_equal "value\n", File.read(#{data.dump})
+              assert_equal "value\n", File.method(:read).super_method.call(#{data.dump})
             else
               pass
             end

@@ -3,7 +3,7 @@
 require_relative "test_helper"
 
 class NonMutationTest < TestmonTestCase
-  def test_observer_does_not_change_core_ancestors_or_method_owners
+  def test_observer_only_prepends_the_approved_direct_read_boundary_once
     before = core_shape
     session = RecordingSession.new
     with_project do |project|
@@ -14,7 +14,12 @@ class NonMutationTest < TestmonTestCase
       observer.close
     end
 
-    assert_equal before, core_shape
+    after = core_shape
+    wrapper = Minitest::Testmon::DirectFileReads::Methods
+    assert_equal before.except(:file_singleton_ancestors, :file_read_owner), after.except(:file_singleton_ancestors, :file_read_owner)
+    assert_equal before.fetch(:file_singleton_ancestors).reject { |item| item == wrapper }, after.fetch(:file_singleton_ancestors).reject { |item| item == wrapper }
+    assert_equal 1, after.fetch(:file_singleton_ancestors).count(wrapper)
+    assert_equal wrapper, after.fetch(:file_read_owner)
   end
 
   private

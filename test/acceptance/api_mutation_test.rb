@@ -5,7 +5,7 @@ require_relative "test_helper"
 class ApiMutationTest < Minitest::Test
   include ProductAcceptance
 
-  def test_observation_does_not_replace_file_io_pathname_psych_or_json_apis
+  def test_observation_only_prepends_the_direct_file_read_boundary
     require_product!
 
     with_project("discovery") do |project|
@@ -39,8 +39,7 @@ class ApiMutationTest < Minitest::Test
 
       clean = JSON.parse(clean_path.read)
       active_snapshot = JSON.parse(active_path.read)
-      assert_equal clean, active_snapshot,
-        "observer changed File/IO/Pathname/Psych/JSON method ownership, signatures, source locations, or ancestors"
+      assert_only_direct_read_api_changed clean, active_snapshot
     end
   end
 end

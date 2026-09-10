@@ -10,7 +10,7 @@ class SuggestionProbeTest < Minitest::Test
     # standard:disable Style/FileRead
     assert_equal "uncovered input\n", File.open(ROOT.join("data/uncovered.txt"), &:read)
     # standard:enable Style/FileRead
-    assert_equal "opaque input\n", File.read(ROOT.join("data/opaque.txt"))
+    assert_equal "opaque input\n", File.method(:read).super_method.call(ROOT.join("data/opaque.txt"))
     assert_equal ["one.txt"], Dir.children(ROOT.join("uncovered_templates")).sort
 
     Dir.mktmpdir("minitest-testmon-outside-") do |directory|

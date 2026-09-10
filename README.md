@@ -227,7 +227,10 @@ rationale and load-order guidance.
 
 ## Design constraints
 
-- No monkeypatching of `File`, `IO`, `Kernel`, Minitest, Rails, or I18n.
+- Direct `File`/`IO` reads use one prepended Ruby module to capture path arguments
+  that native TracePoint events cannot expose. Calls still delegate to native IO;
+  the module remains idle after observers close. `Kernel` and instance IO methods
+  retain their original implementations.
 - Paths are stored as logical `root:relative/path` identities, not machine-local
   absolute paths.
 - Provider/configuration versions participate in the context signature.

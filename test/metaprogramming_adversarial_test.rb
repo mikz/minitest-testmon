@@ -117,7 +117,7 @@ class MetaprogrammingAdversarialTest < TestmonTestCase
     end
   end
 
-  def test_eval_from_an_opaque_file_read_fails_closed
+  def test_eval_from_a_direct_file_read_claims_the_source_bytes
     with_project do |project|
       generated = write_file(File.join(project, "generated.rb"), "GENERATED_TESTMON_VALUE = :opaque\n")
       generator = write_file(File.join(project, "lib/opaque_eval_target.rb"), <<~RUBY)
@@ -131,8 +131,8 @@ class MetaprogrammingAdversarialTest < TestmonTestCase
 
       report = observe(project, observe_files: true) { TestmonOpaqueEvalTarget.call(generated) }
 
-      refute report.complete?
-      assert report.observations.any? { |observation| observation.reason == :opaque_c_call }
+      assert_test_dependency report, "generated.rb"
+      assert report.observations.any? { |observation| observation.kind == :file_read && observation.path == File.realpath(generated) }
     ensure
       remove_constant(:TestmonOpaqueEvalTarget)
       remove_constant(:GENERATED_TESTMON_VALUE)

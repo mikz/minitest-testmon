@@ -69,7 +69,7 @@ module Minitest
           ruby_paths: core_paths,
           unhookable_ruby_paths: @snapshot.ruby_unhookable_paths,
           test_only: true,
-          observe_files: @force_full || @snapshot.claims_event?(:file_open, :file_read),
+          observe_files: @force_full || @snapshot.file_audit_required?,
           boundary_tracker: @collector
         ).start
         @session.attach_observer(core_observer)

@@ -846,8 +846,7 @@ class RailsCliAcceptanceTest < Minitest::Test
         env: runtime.env.merge(env).merge("RAILS_ACCEPTANCE_API_SNAPSHOT" => active_snapshot.to_s)
       )
       assert_equal 0, active.exitstatus, cli_failure("active API snapshot", active)
-      assert_equal JSON.parse(plain_snapshot.read), JSON.parse(active_snapshot.read),
-        "direct Testmon command changed method owners, signatures, source locations, or ancestors"
+      assert_only_direct_read_api_changed JSON.parse(plain_snapshot.read), JSON.parse(active_snapshot.read)
     end
   end
 end

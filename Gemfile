@@ -20,6 +20,6 @@ group :test do
   gem "pg", "~> 1.7"
   gem "propshaft", "~> 1.3"
   gem "puma", "~> 8.0"
-  gem "rails", "~> 8.1.0"
+  gem "rails", "~> 8.1.4"
   gem "simplecov", "~> 1.3", require: false
 end

@@ -17,7 +17,7 @@ group :test do
   gem "capybara", "~> 3.40"
   gem "capybara-playwright-driver", "~> 0.5.10"
   gem "minitest-reporters", "= 1.7.1"
-  gem "pg", "~> 1.6"
+  gem "pg", "~> 1.7"
   gem "propshaft", "~> 1.3"
   gem "puma", "~> 8.0"
   gem "rails", "~> 8.1.0"

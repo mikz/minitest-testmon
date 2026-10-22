@@ -9,7 +9,7 @@ gemspec
 group :development do
   gem "irb"
   gem "rake", "~> 13.0"
-  gem "standard", "~> 1.55", require: false
+  gem "standard", "~> 1.57", require: false
 end
 
 group :test do

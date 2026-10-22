@@ -15,7 +15,7 @@ end
 group :test do
   gem "bundlebun", "~> 0.5.0", require: false
   gem "capybara", "~> 3.40"
-  gem "capybara-playwright-driver", "~> 0.5.10"
+  gem "capybara-playwright-driver", "~> 0.5.13"
   gem "minitest-reporters", "= 1.7.1"
   gem "pg", "~> 1.7"
   gem "propshaft", "~> 1.3"

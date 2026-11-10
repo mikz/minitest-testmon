@@ -426,7 +426,7 @@ module Minitest
       end
 
       def ruby_locator(path)
-        return @ruby_path_policy.locator(path) if @ruby_path_policy
+        return @ruby_path_policy.locator(path) if @ruby_path_policy && !@ruby_paths
         return project_locator(path) unless @ruby_paths
         return unless path.respond_to?(:to_path) || path.respond_to?(:to_str)
         path = path.to_path if path.respond_to?(:to_path)

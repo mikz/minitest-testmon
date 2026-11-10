@@ -83,6 +83,7 @@ module Minitest
         if @ruby_path_policy
           return !!@ruby_path_policy.project_locator(location.absolute_path || location.path)
         end
+        return !!ruby_locator(location.absolute_path || location.path) if @ruby_paths
         locator = @resolver.resolve(location.absolute_path || location.path)
         locator.root == :project && !nested_testmon_path?(locator.absolute_path)
       rescue PathError

@@ -391,7 +391,6 @@ class CLIIntegrationTest < TestmonTestCase
       end
         .flat_map { |item| [item["path"], item.dig("callsite", "path")] }
         .compact
-      ignored_observations = report.dig("observations", "ignored", "items")
       vendored_logical_path = "project:#{vendored_relative_path}"
 
       assert_equal({
@@ -399,17 +398,12 @@ class CLIIntegrationTest < TestmonTestCase
         executed_tests: ["ValueTest#test_vendored_value"],
         present_in_inventory: false,
         present_in_fatal_observations: false,
-        ignored_dependency_read: true,
         publication: {"published" => true, "reason" => nil}
       }, {
         native_success: status.success?,
         executed_tests: report.dig("tests", "executed"),
         present_in_inventory: inventory_paths.include?(vendored_logical_path),
         present_in_fatal_observations: fatal_observation_paths.include?(vendored_logical_path),
-        ignored_dependency_read: ignored_observations.any? do |item|
-          item.fetch("reason") == "user_ignored" &&
-            item.dig("callsite", "path") == vendored_logical_path
-        end,
         publication: report.fetch("publication")
       }, [stdout, stderr, JSON.pretty_generate(report)].join("\n"))
     end

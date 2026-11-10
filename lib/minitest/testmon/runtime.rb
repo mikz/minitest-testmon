@@ -113,9 +113,10 @@ module Minitest
       end
 
       def infrastructure_failure!(reason)
+        @exit_state[:status] = 4 if @configuration.require_complete_cache
         if reason.to_s == "unsupported_parallelism"
           @exit_state[:status] = 4
-        elsif !supervised? && @learning_stopped != "source_drift"
+        elsif !supervised? && (@configuration.require_complete_cache || @learning_stopped != "source_drift")
           accepted = @store.connected? ? checkpoint_progress.fetch("accepted_ids").length : 0
           if accepted.positive?
             warn "Testmon: #{accepted} checkpointed tests preserved; remaining evidence could not be safely published (#{reason})."

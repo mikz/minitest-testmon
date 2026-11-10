@@ -13,6 +13,9 @@ Minitest::Testmon.configure do |config|
   # Testmon retains the latest 10 run reports by default.
   # config.retained_reports 25
 
+  # Finish all selected tests, then exit 4 if cache publication is incomplete.
+  # config.require_complete_cache true
+
   # Add another stable logical root when inputs live outside the project root.
   # config.root :shared, File.expand_path("../shared", __dir__)
   # config.ruby_files "lib/**/*.rb", root: :shared

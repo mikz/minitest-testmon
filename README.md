@@ -106,7 +106,15 @@ snapshot contains the exact checksum of every input learned for that test. A
 later run with no relevant change executes no tests. Tests run once, and their
 normal result remains authoritative. If Testmon cannot safely update its cache,
 it keeps the last known-good state and prints a warning. Invalid or unsupported
-commands still fail clearly. To inspect why a path selects tests:
+commands still fail clearly.
+
+Set `config.require_complete_cache true` in `.minitest-testmon.rb` to make
+incomplete cache publication an error. All selected tests finish before the
+command exits 4, and accepted checkpoints remain available. This also rejects
+source drift and missing wrapper receipts. A complete warm-cache run that
+selects zero tests still succeeds. The default is warning-only.
+
+To inspect why a path selects tests:
 
 ```sh
 bundle exec minitest-testmon explain app/views/accounts/show.html.erb

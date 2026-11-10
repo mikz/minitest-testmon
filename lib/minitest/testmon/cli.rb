@@ -109,15 +109,16 @@ module Minitest
         else
           report = nil
         end
-        warn_unpublished_report(report) if status.zero?
+        warn_unpublished_report(report, strict: configuration.require_complete_cache) if status.zero? || status == 4
+        status = 4 if status.zero? && configuration.require_complete_cache && !report&.fetch("ready", false)
 
         status
       end
 
-      def warn_unpublished_report(report)
+      def warn_unpublished_report(report, strict: false)
         return if report&.dig("publication", "published")
 
-        return if report&.dig("checkpoints", "stop_reason") == "source_drift"
+        return if !strict && report&.dig("checkpoints", "stop_reason") == "source_drift"
         reason = report&.dig("publication", "reason")
         detail = reason ? " (#{reason})" : ""
         accepted = report&.dig("checkpoints", "accepted_ids") || []

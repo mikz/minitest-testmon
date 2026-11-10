@@ -31,6 +31,7 @@ module Minitest
         @version = FORMAT_VERSION
         @database_path = File.join(cwd, DEFAULT_DATABASE)
         @retained_reports = DEFAULT_RETAINED_REPORTS
+        @require_complete_cache = false
         @roots = {}
         @complete_suite_globs = DEFAULT_COMPLETE_SUITE_GLOBS
         @complete_suite_globs_customized = false
@@ -88,6 +89,15 @@ module Minitest
         @complete_suite_globs = values.freeze
       rescue TypeError
         raise ConfigurationError, "complete suite globs must contain strings"
+      end
+
+      def require_complete_cache(value = NOT_PROVIDED)
+        return @require_complete_cache if value.equal?(NOT_PROVIDED)
+        mutable!
+        unless value == true || value == false
+          raise ConfigurationError, "require_complete_cache must be true or false"
+        end
+        @require_complete_cache = value
       end
 
       # Profile/bundle entry point: declares the canonical globs without

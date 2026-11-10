@@ -54,23 +54,27 @@ class CheckpointRuntimeTest < TestmonTestCase
   end
 
   def test_drift_pauses_learning_but_keeps_earlier_progress
-    with_checkpoint_project do |project|
-      pid = start_run(project, "PAUSE" => "1")
-      wait_for_checkpoint(project)
-      File.write(File.join(project, "lib/unused.rb"), "UNUSED = 2\n")
-      File.write(File.join(project, "tmp/release"), "go")
-      _, status = Process.wait2(pid)
-      pid = nil
-      assert status.success?, File.read(File.join(project, "tmp/stderr"))
-      assert_equal 25, snapshots_count(project)
-      report = read_report(project)
-      assert_equal "source_drift", report.dig("publication", "reason")
-      assert_equal "source_drift", report.dig("checkpoints", "stop_reason")
-      assert_equal 25, report.dig("checkpoints", "accepted_ids").length
-      # An unused source edit does not change the saved tests' learned inputs.
-      assert_equal 5, finish_run(project).dig("tests", "selected").length
-    ensure
-      stop_run(pid)
+    [false, true].each do |strict|
+      with_checkpoint_project do |project|
+        write_file(File.join(project, ".minitest-testmon.rb"), "Minitest::Testmon.configure { |config| config.require_complete_cache #{strict} }\n")
+        pid = start_run(project, "PAUSE" => "1")
+        wait_for_checkpoint(project)
+        File.write(File.join(project, "lib/unused.rb"), "UNUSED = 2\n")
+        File.write(File.join(project, "tmp/release"), "go")
+        _, status = Process.wait2(pid)
+        pid = nil
+        assert_equal(strict ? 4 : 0, status.exitstatus, File.read(File.join(project, "tmp/stderr")))
+        assert_equal 25, snapshots_count(project)
+        report = read_report(project)
+        assert_equal "source_drift", report.dig("publication", "reason")
+        assert_equal "source_drift", report.dig("checkpoints", "stop_reason")
+        assert_equal 25, report.dig("checkpoints", "accepted_ids").length
+        assert_equal 30, report.dig("tests", "executed").length
+        # An unused source edit does not change the saved tests' learned inputs.
+        assert_equal 5, finish_run(project).dig("tests", "selected").length
+      ensure
+        stop_run(pid)
+      end
     end
   end
 
@@ -102,6 +106,38 @@ class CheckpointRuntimeTest < TestmonTestCase
       warm = finish_run(project)
       assert_empty warm.dig("tests", "selected")
       assert warm.dig("publication", "published")
+    end
+  end
+
+  def test_strict_publication_finishes_every_test_and_preserves_checkpoints
+    [command, [RbConfig.ruby, "-I#{File.expand_path("../lib", __dir__)}", "-rminitest/testmon_plugin", "-Itest", "test/example_test.rb", "--testmon"]].each do |invocation|
+      with_checkpoint_project do |project|
+        write_file(File.join(project, ".minitest-testmon.rb"), "Minitest::Testmon.configure { |config| config.require_complete_cache true }\n")
+        File.open(File.join(project, "test/example_test.rb"), "a") do |file|
+          file.puts "CheckpointExample.define_method(:test_10, Kernel.instance_method(:itself))"
+        end
+
+        environment = {"MINITEST_TESTMON_CONFIG" => File.join(project, ".minitest-testmon.rb")}
+        stdout, stderr, status = Open3.capture3(environment, *invocation, chdir: project)
+        assert_equal 4, status.exitstatus, [stdout, stderr].join("\n")
+        assert_match(/30 runs,/, stdout)
+        report = read_report(project)
+        assert_equal 30, report.dig("tests", "executed").length
+        assert_equal "provider_incomplete", report.dig("publication", "reason")
+        assert_equal 29, snapshots_count(project)
+
+        _stdout, stderr, status = Open3.capture3(environment, *invocation, chdir: project)
+        assert_equal 4, status.exitstatus, stderr
+        assert_equal ["CheckpointExample#test_10"], read_report(project).dig("tests", "selected")
+      end
+    end
+  end
+
+  def test_strict_complete_and_zero_selection_runs_succeed
+    with_checkpoint_project do |project|
+      write_file(File.join(project, ".minitest-testmon.rb"), "Minitest::Testmon.configure { |config| config.require_complete_cache true }\n")
+      assert_equal 30, finish_run(project).dig("tests", "executed").length
+      assert_empty finish_run(project).dig("tests", "selected")
     end
   end
 

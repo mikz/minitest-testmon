@@ -45,7 +45,9 @@ if defined?(Rails::Railtie)
                 require "puma"
                 require "puma/configuration"
                 require "minitest/testmon/puma_configuration_attribution"
+                require "minitest/testmon/puma_request_attribution"
                 Puma::Configuration.prepend(Minitest::Testmon::PumaConfigurationAttribution)
+                Puma::Server.prepend(Minitest::Testmon::PumaRequestAttribution)
               end
             end
           end

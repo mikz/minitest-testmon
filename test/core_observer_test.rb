@@ -350,6 +350,7 @@ class CoreObserverTest < TestmonTestCase
     with_project do |project|
       data = write_file(File.join(project, "data.txt"), "value")
       application = write_file(File.join(project, "app/reader.rb"), "File.read(#{data.dump})\n")
+      template = write_file(File.join(project, "app/views/reader.erb"), "File.read(#{data.dump})\n")
       dependency = write_file(
         File.join(project, "vendor/bundle/ruby/4.0.0/gems/example/lib/example.rb"),
         "File.read(#{data.dump})\n"
@@ -361,7 +362,7 @@ class CoreObserverTest < TestmonTestCase
       resolver = Minitest::Testmon::PathResolver.new(project: project)
       [
         {ruby_path_policy: Minitest::Testmon::RubyPathPolicy.new(configuration)},
-        {ruby_paths: [application]}
+        {ruby_paths: [application], ruby_path_policy: Minitest::Testmon::RubyPathPolicy.new(configuration)}
       ].each do |options|
         session = RecordingSession.new
         observer = Minitest::Testmon::CoreObserver.new(
@@ -372,6 +373,7 @@ class CoreObserverTest < TestmonTestCase
 
         load dependency_link
         load application
+        load template
         observer.close
 
         dependency_paths = [File.realpath(dependency), resolver.resolve(dependency).key]
@@ -384,7 +386,9 @@ class CoreObserverTest < TestmonTestCase
           application_paths.include?(observation.path) || application_paths.include?(observation.callsite&.fetch(:path))
         end
         assert application_observed
-        assert session.observations.any? { |item| item.kind == :file_read && item.path == File.realpath(data) }
+        reads = session.observations.select { |item| item.kind == :file_read && item.path == File.realpath(data) }
+        assert_equal [resolver.resolve(application).key, resolver.resolve(template).key].sort,
+          reads.map { |item| item.callsite.fetch(:path) }.sort
       end
     end
   end

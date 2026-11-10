@@ -67,6 +67,7 @@ module Minitest
           resolver: @snapshot.context.resolver,
           allowed_roots: core_roots,
           ruby_paths: core_paths,
+          ruby_path_policy: RubyPathPolicy.new(@configuration),
           unhookable_ruby_paths: @snapshot.ruby_unhookable_paths,
           test_only: true,
           observe_files: @force_full || @snapshot.file_audit_required?,

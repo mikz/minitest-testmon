@@ -25,6 +25,17 @@ class ConfigurationTest < TestmonTestCase
     assert_raises(Minitest::Testmon::ConfigurationError) { configuration.retained_reports nil }
   end
 
+  def test_complete_cache_requirement_is_boolean_and_frozen_with_configuration
+    configuration = Minitest::Testmon::Configuration.new
+    refute configuration.require_complete_cache
+    configuration.require_complete_cache true
+    assert configuration.require_complete_cache
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.require_complete_cache "true" }
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.require_complete_cache nil }
+    configuration.snapshot
+    assert_raises(Minitest::Testmon::ConfigurationError) { configuration.require_complete_cache false }
+  end
+
   def test_versioned_snapshot_is_deterministic_and_immutable
     with_project do |project|
       first = Minitest::Testmon::Configuration.new(cwd: project)

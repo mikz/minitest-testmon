@@ -577,6 +577,15 @@ class CLIIntegrationTest < TestmonTestCase
       )
       assert_equal 7, failed.exitstatus
       assert_equal ["test"], File.readlines(marker, chomp: true)
+
+      write_file(File.join(directory, ".minitest-testmon.rb"), "Minitest::Testmon.configure { |config| config.require_complete_cache true }\n")
+      _stdout, stderr, strict_status = Open3.capture3(
+        {"EXECUTION_MARKER" => marker},
+        RbConfig.ruby, EXECUTABLE, "run", "--", RbConfig.ruby, command,
+        chdir: directory
+      )
+      assert_equal 4, strict_status.exitstatus, stderr
+      assert_equal ["test", "test"], File.readlines(marker, chomp: true)
     end
   end
 

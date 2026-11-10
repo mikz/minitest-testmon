@@ -137,6 +137,8 @@ module Minitest
         end
         return if @learning_stopped || !@session.checkpoint_supported?
         if process_parallel?
+          # Rails forks every worker before queuing tests; only workers need observers now.
+          return stop_learning("provider_incomplete") unless @session.close_observers_for_worker!
           observations, diagnostics, identity = WorkerSpool.completion(
             directory: worker_spool_root, run_id: @run_id, test_id: test_id, outcome: outcome,
             context_signature: @snapshot.signature, base_revision: @selection.base_revision,

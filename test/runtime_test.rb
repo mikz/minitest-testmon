@@ -3,6 +3,35 @@
 require_relative "test_helper"
 
 class RuntimeTest < TestmonTestCase
+  def test_parent_observer_shutdown_failure_stops_checkpoint_learning
+    with_project do |project|
+      configuration = Minitest::Testmon::Configuration.new(cwd: project)
+      runtime = Minitest::Testmon::Runtime.new(configuration: configuration,
+        registry: Minitest::Testmon::ProviderRegistry.new)
+      store = runtime.instance_variable_get(:@store)
+      run_id = runtime.instance_variable_get(:@run_id)
+      session = runtime.instance_variable_get(:@snapshot).observe
+      observer = Object.new
+      observer.define_singleton_method(:close) { raise IOError, "forced shutdown failure" }
+      session.attach_observer(observer)
+      runtime.instance_variable_set(:@session, session)
+      runtime.instance_variable_set(:@process_parallel, true)
+      selection = Minitest::Testmon::Selection.new(discovered: ["Example#test"], selected: ["Example#test"],
+        reasons_by_test: {"Example#test" => ["no_trace"]}, base_revision: nil)
+      store.acquire_lease!(run_id: run_id)
+      store.start_execution(run_id: run_id, selection: selection)
+
+      _stdout, stderr = capture_io { runtime.record_checkpoint("Example#test", :passed) }
+
+      assert_includes stderr, "Cache learning paused (provider_incomplete)"
+      assert_equal "provider_incomplete", store.checkpoint_progress(run_id).fetch("stop_reason")
+      assert_empty store.snapshots_for(["Example#test"])
+      refute session.finalize.complete?
+    ensure
+      store&.close
+    end
+  end
+
   def test_snapshot_builder_reuses_catalog_until_immutable_inputs_change
     fingerprint = Minitest::Testmon::Fingerprint.known("digest")
     definition = Minitest::Testmon::Input.new(key: "test", provider: "test", facet: "content", fingerprint: fingerprint)
